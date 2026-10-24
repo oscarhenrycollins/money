@@ -1,7 +1,7 @@
 {
   "name": "Money",
   "id": "money",
-  "wizard_type": "service",
+  "wizard_type": "view",
   "available": true,
   "short_desc": "Review transactions, set categories and rules, and see spending over your bank connection.",
   "author": "Humanity Labs",
@@ -11,7 +11,7 @@
   ],
   "description": "A simple money app over your bank connection (SimpleFIN by default). Review transactions, set categories, names, notes and rules, and see spending by category. Your edits stay in Money's own database and never change the bank's data.",
   "tipi_version": 1,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "source": "https://github.com/oscarhenrycollins/money",
   "exposable": false,
   "supported_architectures": [

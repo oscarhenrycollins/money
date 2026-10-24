@@ -2,9 +2,9 @@
 wizard: 0.2
 id: money
 name: Money
-type: service
+type: view
 category: app
-version: 0.1.1
+version: 0.1.2
 summary: Review transactions, set categories and rules, and see spending, over your bank connection.
 tags: [finance]
 license: GPL-3.0-only

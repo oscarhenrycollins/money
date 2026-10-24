@@ -3,11 +3,15 @@
 html[data-color-scheme="light"] .mn-app { --base: #f7f6fb; --green: #18834f; --amber: #a86400; }
 .mn-app [hidden] { display: none !important; }
 
-.mn-tabs { display: flex; gap: 6px; padding: calc(var(--wos-cutout, 0px) + 10px) 12px 8px; }
-.mn-tabs button { flex: 1; min-height: 40px; border: 0; border-radius: 99px; font: inherit; font-size: 14px; font-weight: 700; color: var(--ink-2); background: var(--solid); cursor: pointer; }
-.mn-tabs button.is-on { color: var(--on-accent); background: var(--accent); }
-.mn-badge { display: inline-block; min-width: 20px; padding: 1px 6px; margin-left: 4px; border-radius: 99px; font-size: 11.5px; background: var(--amber); color: #2a1a00; }
-.mn-scroll { padding: 4px 12px 28px; }
+/* Bottom tabs, in thumb reach (same pattern as Card Benefits) */
+.mn-tabs { flex: none; display: grid; grid-template-columns: repeat(3, 1fr); padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--line); background: var(--base); }
+.mn-tabs button { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 50px; border: 0; background: none; font: inherit; font-size: 11.5px; font-weight: 650; color: var(--ink-3); cursor: pointer; }
+.mn-tabs svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.mn-tabs button.is-on { color: var(--accent); }
+.mn-badge { position: absolute; top: 4px; left: calc(50% + 8px); min-width: 18px; padding: 1px 5px; border-radius: 99px; font-size: 10.5px; font-style: normal; font-weight: 800; line-height: 15px; background: var(--amber); color: #2a1a00; }
+html.wz-hosted .mn-tabs { padding: 2px 8px; }
+html.wz-hosted .mn-tabs button { min-height: 44px; gap: 1px; }
+.mn-scroll { padding: calc(var(--wos-cutout, 0px) + 12px) 12px 24px; }
 .mn-small { margin: 8px 4px 0; font-size: 12.5px; color: var(--ink-3); line-height: 1.4; }
 .mn-empty { margin: 18px 4px; font-size: 14px; color: var(--ink-3); text-align: center; list-style: none; }
 
@@ -70,7 +74,7 @@ html[data-color-scheme="light"] .mn-app { --base: #f7f6fb; --green: #18834f; --a
 .mn-rules li { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13.5px; }
 
 /* Transaction sheet: fully opaque */
-.mn-sheet { position: fixed; inset: 0; z-index: 20; display: flex; align-items: flex-end; justify-content: center; background: rgba(0, 0, 0, .55); }
+.mn-sheet { position: fixed; inset: 0; z-index: 30; display: flex; align-items: flex-end; justify-content: center; background: rgba(0, 0, 0, .55); }
 .mn-sheet-card { width: min(560px, 100%); max-height: 88vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); border-radius: 22px 22px 0 0; background: var(--base); box-shadow: 0 -10px 40px rgba(0, 0, 0, .4); }
 @media (min-width: 700px) { .mn-sheet { align-items: center; } .mn-sheet-card { border-radius: 22px; } }
 .mn-sheet-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 4px; }

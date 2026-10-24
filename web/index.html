@@ -13,11 +13,6 @@
 </head>
 <body>
   <div class="wz-app mn-app">
-    <nav class="mn-tabs" role="tablist">
-      <button type="button" role="tab" data-tab="review" class="is-on">Review <span id="badge" class="mn-badge" hidden></span></button>
-      <button type="button" role="tab" data-tab="spending">Spending</button>
-      <button type="button" role="tab" data-tab="accounts">Accounts</button>
-    </nav>
     <main class="wz-scroll mn-scroll">
       <!-- No bank connection yet -->
       <section id="setup" class="mn-setup" hidden>
@@ -67,6 +62,11 @@
         </details>
       </section>
     </main>
+    <nav class="mn-tabs" role="tablist" aria-label="Views">
+      <button type="button" role="tab" data-tab="review" class="is-on"><svg viewBox="0 0 24 24"><path d="M5 12l4 4 10-10"/></svg><span>Review</span><i id="badge" class="mn-badge" hidden></i></button>
+      <button type="button" role="tab" data-tab="spending"><svg viewBox="0 0 24 24"><path d="M4 20V10 M10 20V4 M16 20v-7 M22 20H2"/></svg><span>Spending</span></button>
+      <button type="button" role="tab" data-tab="accounts"><svg viewBox="0 0 24 24"><path d="M3 10l9-6 9 6 M5 10v8 M9.5 10v8 M14.5 10v8 M19 10v8 M3 20h18"/></svg><span>Accounts</span></button>
+    </nav>
 
     <!-- One transaction -->
     <div class="mn-sheet" id="sheet" hidden>
