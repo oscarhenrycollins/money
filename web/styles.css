@@ -90,3 +90,15 @@ html.wz-hosted .mn-tabs button { min-height: 44px; gap: 1px; }
 .mn-check { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 13.5px; color: var(--ink-2); }
 .mn-check input { width: 18px; height: 18px; accent-color: var(--accent); }
 .mn-sheet-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
+/* Where each thing comes from */
+.mn-sec { display: flex; align-items: center; gap: 8px; margin: 16px 4px 8px; font-size: 13px; font-weight: 650; color: var(--ink-3); }
+.mn-sec:first-child { margin-top: 4px; }
+.mn-tag { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 800; letter-spacing: .01em; line-height: 16px; vertical-align: 1px; }
+.mn-tag.bank { color: #0b2133; background: #7cc7ff; }
+.mn-tag.manual { color: #2a1a00; background: var(--amber); }
+.mn-tag.import { color: var(--ink); background: var(--solid-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.mn-row-n small .mn-tag { padding: 0 6px; font-size: 10.5px; line-height: 15px; }
+.mn-pad { margin: 0 4px 6px; }
+.mn-tap { cursor: pointer; }
+.mn-sheet-title { font-size: 17px; }

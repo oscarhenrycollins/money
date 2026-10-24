@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.1.3'
+VERSION = '0.2.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -73,6 +73,8 @@ def db():
         merchant TEXT, created TEXT);
       CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, pos INTEGER);
       CREATE TABLE IF NOT EXISTS log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, source TEXT, tx TEXT, before TEXT);
+      CREATE TABLE IF NOT EXISTS manual (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, amount REAL,
+        note TEXT, updated TEXT);
     ''')
     if not c.execute('SELECT 1 FROM categories LIMIT 1').fetchone():
         with c:
@@ -271,12 +273,40 @@ SELECT = '''SELECT t.source, t.id, t.account, a.institution, a.name AS account_n
   FROM tx t LEFT JOIN accounts a ON a.source=t.source AND a.id=t.account LEFT JOIN edits e ON e.source=t.source AND e.id=t.id'''
 
 
+def _key(inst, name, last_four):
+    """Match one account across providers: bank word + last four digits (+ Morgan Stanley, which shares numbers)."""
+    l4 = last_four or (re.findall(r'(\d{4,5})\)?\s*$', name or '') or [None])[0]
+    if not l4:
+        return None
+    word = (re.findall(r'[a-z]+', (inst or '').lower()) or [''])[0]
+    return (word, l4[-4:], 'morgan' in (name or '').lower())
+
+
+def _live_starts(c, live):
+    starts = {}
+    for r in c.execute('''SELECT a.institution, a.name, a.last_four, MIN(t.date) AS d FROM tx t
+                          JOIN accounts a ON a.source=t.source AND a.id=t.account WHERE t.source=? GROUP BY t.account''', (live,)):
+        k = _key(r['institution'], r['name'], r['last_four'])
+        if k and r['d']:
+            starts[k] = min(starts.get(k, r['d']), r['d'])
+    return starts
+
+
+def _origin_names(c, live):
+    meta = _setting(c, 'history') or {}
+    return {'bank': NAMES.get(live, live), 'import': (meta.get('from_name') or 'Imported') + ' history'}
+
+
 def transactions(args, c=None):
     own = c is None
     c = c or db()
     try:
         src = active_source(c)
-        q, p = [SELECT + ' WHERE t.source=?'], [src]
+        q, p = [SELECT + " WHERE t.source IN (?, 'import')"], [src]
+        if args.get('origin') == 'bank':
+            q.append('AND t.source=?'); p.append(src)
+        elif args.get('origin') == 'import':
+            q.append("AND t.source='import'")
         for key, op in (('from', '>='), ('to', '<=')):
             v = args.get(key)
             if v:
@@ -296,14 +326,27 @@ def transactions(args, c=None):
         limit = max(1, min(int(args.get('limit') or 200), 2000))
         q.append('ORDER BY t.date DESC, t.id DESC')
         rules = _rules(c)
-        rows = [_view(r, rules) for r in c.execute(' '.join(q), p)]
+        starts, names = _live_starts(c, src), _origin_names(c, src)
+        rows = []
+        for r in c.execute(' '.join(q), p):
+            if r['source'] == 'import':
+                k = _key(r['institution'], r['account_name'], r['last_four'])
+                if k in starts and (r['date'] or '') >= starts[k]:
+                    continue   # the live connection covers this account from here on: never show it twice
+            v = _view(r, rules)
+            v['origin'] = 'import' if r['source'] == 'import' else 'bank'
+            v['origin_name'] = names[v['origin']]
+            rows.append(v)
         if args.get('search'):
             s = str(args['search'])[:80].lower()
             rows = [r for r in rows if any(s in str(r.get(k) or '').lower() for k in ('merchant', 'description', 'note', 'category', 'account_name'))]
         if args.get('category'):
             want = str(args['category']).lower()
             rows = [r for r in rows if (r['category'] or 'Uncategorized').lower() == want]
-        return {'count': len(rows[:limit]), 'total': len(rows), 'transactions': rows[:limit]}
+        out = {'count': len(rows[:limit]), 'total': len(rows), 'transactions': rows[:limit]}
+        if args.get('all') is True:
+            out['rows'] = rows
+        return out
     finally:
         if own:
             c.close()
@@ -414,6 +457,137 @@ def import_setup(body):
     return {'ok': True, 'rules_added': added}
 
 
+def _fetch_all(base, since):
+    rows, to, guard = {}, None, 0
+    while guard < 40:
+        q = {'limit': 1000, 'from': since, **({'to': to} if to else {})}
+        batch = _get(base, '/api/transactions', q, timeout=90).get('transactions') or []
+        new = [t for t in batch if t['id'] not in rows]
+        for t in new:
+            rows[t['id']] = t
+        guard += 1
+        if len(batch) < 1000 or not new:
+            break
+        to = min(t['date'] for t in batch if t.get('date'))
+    return rows
+
+
+def import_history(body):
+    """One-time copy of another money app's transactions from a start date. Rows for an account stop showing
+    from the day the live connection's own data for that account begins, so nothing appears twice."""
+    sid = body.get('source') or 'wizard-monarch'
+    base = dict(SOURCES).get(sid)
+    since = str(body.get('from') or '2026-01-01')
+    if not base or not DATE_RE.match(since):
+        raise Problem(400, 'Pick a money app to import from and a start date (YYYY-MM-DD).')
+    with LOCK:
+        c = db()
+        try:
+            if sid == active_source(c):
+                raise Problem(400, 'That app is already your live connection.')
+        finally:
+            c.close()
+    accts = _get(base, '/api/accounts').get('accounts') or []
+    rows = _fetch_all(base, since)
+    now = _now()
+    made = 0
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                c.execute("DELETE FROM accounts WHERE source='import'")
+                c.execute("DELETE FROM tx WHERE source='import'")
+                for a in accts:
+                    if (a.get('institution') or '').lower() == 'manual':
+                        # The other app's hand-kept accounts become Money manual accounts (kept if already made).
+                        if not c.execute('SELECT 1 FROM manual WHERE lower(name)=lower(?)', (a.get('name'),)).fetchone():
+                            c.execute('INSERT INTO manual VALUES (?,?,?,?,?,?)', ('m' + str(a['id'])[-10:], str(a.get('name'))[:60], 'usd',
+                                      _num(a.get('ledger') if a.get('ledger') is not None else a.get('balance')), f'Copied from {NAMES.get(sid, sid)}', now))
+                            made += 1
+                        continue
+                    c.execute('INSERT OR REPLACE INTO accounts VALUES (?,?,?,?,?,?,?,?,?)', ('import', str(a['id']), a.get('institution'),
+                              a.get('name'), a.get('last_four'), a.get('type'), a.get('currency') or 'USD', None, None))
+                for t in rows.values():
+                    c.execute('INSERT OR REPLACE INTO tx VALUES (?,?,?,?,?,?,?,?,?,?)', ('import', str(t['id']), str(t.get('account')), t.get('date'),
+                              _num(t.get('amount')), (t.get('description') or '')[:200], t.get('counterparty') or None, t.get('category'), 'posted', now))
+                    # History arrives already reviewed: it was reviewed (or not) in the old app, not here.
+                    c.execute('INSERT OR IGNORE INTO edits VALUES (?,?,?,?,?,?,?,?)', ('import', str(t['id']), 1, None, None, None, 0, now))
+                _set(c, 'history', {'from': since, 'from_name': NAMES.get(sid, sid), 'source': sid, 'at': now, 'rows': len(rows)})
+        finally:
+            c.close()
+    shown = transactions({'origin': 'import', 'limit': 1, 'hidden': 'true'})['total']
+    return {'ok': True, 'imported': len(rows), 'showing': shown, 'manual_accounts_added': made}
+
+
+def _btc_price(c):
+    cached = _setting(c, 'btc') or {}
+    if cached.get('at') and time.time() - cached['at'] < 600:
+        return cached
+    try:
+        req = urllib.request.Request('https://api.coinbase.com/v2/prices/BTC-USD/spot', headers={'User-Agent': f'money/{VERSION}'})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            price = float(json.loads(r.read())['data']['amount'])
+        cached = {'price': round(price, 2), 'at': time.time()}
+        with c:
+            _set(c, 'btc', cached)
+    except (OSError, ValueError, KeyError):
+        cached['stale'] = True
+    return cached
+
+
+def manual_accounts(c):
+    rows = [dict(r) for r in c.execute('SELECT id,name,kind,amount,note,updated FROM manual ORDER BY name')]
+    price = _btc_price(c) if any(r['kind'] == 'btc' for r in rows) else {}
+    for r in rows:
+        r['balance'] = round((r['amount'] or 0) * price['price'], 2) if r['kind'] == 'btc' and price.get('price') else (r['amount'] if r['kind'] != 'btc' else None)
+        if r['kind'] == 'btc':
+            r['btc_price'] = price.get('price')
+            r['price_stale'] = bool(price.get('stale'))
+    return rows
+
+
+def manual_save(body):
+    name = str(body.get('name') or '').strip()[:60]
+    kind = body.get('kind')
+    if not name:
+        raise Problem(400, 'Give the account a name.')
+    if kind not in ('btc', 'usd'):
+        raise Problem(400, 'Pick Bitcoin or Dollars.')
+    try:
+        amount = float(body.get('amount'))
+    except (TypeError, ValueError):
+        raise Problem(400, 'Enter an amount.') from None
+    if not -1e12 < amount < 1e12 or (kind == 'btc' and not 0 <= amount <= 21e6):
+        raise Problem(400, 'That amount looks wrong.')
+    mid = str(body.get('id') or '') or 'm' + secrets_token()
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                c.execute('INSERT OR REPLACE INTO manual VALUES (?,?,?,?,?,?)', (mid, name, kind, round(amount, 8),
+                          (str(body.get('note') or '').strip()[:200] or None), _now()))
+        finally:
+            c.close()
+    return {'ok': True, 'id': mid}
+
+
+def secrets_token():
+    import secrets
+    return secrets.token_hex(5)
+
+
+def manual_delete(mid):
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                if not c.execute('DELETE FROM manual WHERE id=?', (mid,)).rowcount:
+                    raise Problem(404, 'No such account.')
+        finally:
+            c.close()
+    return {'ok': True}
+
+
 def set_source(body):
     sid = body.get('source')
     if sid not in dict(SOURCES):
@@ -467,11 +641,16 @@ def overview():
     try:
         src = active_source(c, srcs)
         accts = [dict(r) for r in c.execute('SELECT id,institution,name,last_four,type,currency,balance,balance_at FROM accounts WHERE source=? ORDER BY institution,name', (src,))]
-        to_review = c.execute('SELECT COUNT(*) FROM tx t LEFT JOIN edits e ON e.source=t.source AND e.id=t.id WHERE t.source=? AND COALESCE(e.reviewed,0)=0 AND COALESCE(e.hidden,0)=0', (src,)).fetchone()[0]
-        n = c.execute('SELECT COUNT(*) FROM tx WHERE source=?', (src,)).fetchone()[0]
+        visible = transactions({'limit': 1, 'all': True}, c)
+        allrows = visible['rows']
         cats = [r[0] for r in c.execute('SELECT name FROM categories ORDER BY pos')]
+        hist = _setting(c, 'history')
+        if hist:
+            hist['showing'] = sum(1 for r in allrows if r['origin'] == 'import')
         out = {'source': src, 'source_name': NAMES.get(src, src), 'sources': srcs, 'chosen': bool(_setting(c, 'source')),
-               'accounts': accts, 'to_review': to_review, 'transactions': n, 'categories': cats, 'rules': _rules(c),
+               'accounts': accts, 'manual': manual_accounts(c), 'history': hist,
+               'to_review': sum(1 for r in allrows if not r['reviewed']), 'transactions': len(allrows),
+               'categories': cats, 'rules': _rules(c),
                'last_sync': _setting(c, 'last_sync'), 'error': _setting(c, 'last_error'), 'syncing': SYNCING.is_set()}
     finally:
         c.close()
@@ -483,9 +662,9 @@ def overview():
 # ---------------- MCP ----------------
 
 TOOLS = [
-    {'name': 'money_overview', 'description': "Money app overview: which bank connection it reads (SimpleFIN by default), accounts with balances, how many transactions still need review, categories and auto-category rules, last sync.",
+    {'name': 'money_overview', 'description': "Money app overview: which bank connection it reads (SimpleFIN by default), its accounts with balances, manual accounts (e.g. Bitcoin cold storage), imported history, how many transactions still need review, categories and auto-category rules, last sync.",
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
-    {'name': 'money_transactions', 'description': "Search transactions with the owner's categories, merchant names, notes and reviewed state applied. Filters: from/to (YYYY-MM-DD), account (id, last digits or name), search, category, reviewed (true/false), min_amount/max_amount, limit (default 200). Negative = money out.",
+    {'name': 'money_transactions', 'description': "Search transactions with the owner's categories, merchant names, notes and reviewed state applied. Filters: from/to (YYYY-MM-DD), account (id, last digits or name), search, category, reviewed (true/false), min_amount/max_amount, origin (bank = live connection, import = imported history), limit (default 200). Each row says its origin. Negative = money out.",
      'inputSchema': {'type': 'object', 'properties': {'from': {'type': 'string'}, 'to': {'type': 'string'}, 'account': {'type': 'string'}, 'search': {'type': 'string'}, 'category': {'type': 'string'},
                      'reviewed': {'type': 'boolean'}, 'min_amount': {'type': 'number'}, 'max_amount': {'type': 'number'}, 'limit': {'type': 'integer'}}, 'additionalProperties': False},
      'annotations': {'readOnlyHint': True}},
@@ -495,6 +674,10 @@ TOOLS = [
      'inputSchema': {'type': 'object', 'properties': {'source': {'type': 'string'}, 'id': {'type': 'string'}, 'ids': {'type': 'array', 'items': {'type': 'string'}}, 'reviewed': {'type': 'boolean'},
                      'category': {'type': 'string'}, 'merchant': {'type': 'string'}, 'note': {'type': 'string'}, 'hidden': {'type': 'boolean'}, 'make_rule': {'type': 'boolean'}, 'match': {'type': 'string'}},
                      'required': ['source'], 'additionalProperties': False},
+     'annotations': {'readOnlyHint': False, 'destructiveHint': False}},
+    {'name': 'money_manual_account', 'description': "Add or update one of the owner's manual accounts (e.g. a cold-storage Bitcoin wallet): name, kind ('btc' = amount in BTC, valued at the live price; 'usd' = dollar balance), amount, optional note, id to update. Only when the owner asks; never ask for seed phrases or keys.",
+     'inputSchema': {'type': 'object', 'properties': {'id': {'type': 'string'}, 'name': {'type': 'string'}, 'kind': {'type': 'string', 'enum': ['btc', 'usd']}, 'amount': {'type': 'number'}, 'note': {'type': 'string'}},
+                     'required': ['name', 'kind', 'amount'], 'additionalProperties': False},
      'annotations': {'readOnlyHint': False, 'destructiveHint': False}},
 ]
 
@@ -513,7 +696,8 @@ def rpc(msg):
         elif m == 'tools/call':
             a, n = p.get('arguments') or {}, p.get('name')
             fn = {'money_overview': lambda: overview(), 'money_transactions': lambda: transactions(a),
-                  'money_spending': lambda: spending(a.get('month')), 'money_update': lambda: update(a)}.get(n)
+                  'money_spending': lambda: spending(a.get('month')), 'money_update': lambda: update(a),
+                  'money_manual_account': lambda: manual_save(a)}.get(n)
             if not fn:
                 return {'jsonrpc': '2.0', 'id': i, 'error': {'code': -32602, 'message': 'Unknown tool.'}}
             v = fn()
@@ -626,6 +810,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, update(b))
             if path == '/api/undo':
                 return self.send(200, undo())
+            if path == '/api/import/history':
+                return self.send(200, import_history(b))
+            if path == '/api/manual':
+                return self.send(200, manual_save(b))
+            m = re.fullmatch(r'/api/manual/([A-Za-z0-9]{1,20})/delete', path)
+            if m:
+                return self.send(200, manual_delete(m.group(1)))
             if path == '/api/import':
                 return self.send(200, import_setup(b))
             if path == '/api/source':

@@ -27,6 +27,8 @@
           <select id="filter" class="wz-input" aria-label="Show">
             <option value="todo">To review</option>
             <option value="all">All</option>
+            <option value="bank" id="opt-bank">From your bank</option>
+            <option value="import" id="opt-import" hidden>Imported history</option>
           </select>
         </div>
         <div id="list"></div>
@@ -46,7 +48,12 @@
       </section>
 
       <section data-panel="accounts" hidden>
+        <h3 class="mn-sec"><span class="mn-tag bank" id="sec-bank">SimpleFIN</span> Synced from your banks</h3>
         <div id="accts"></div>
+        <h3 class="mn-sec"><span class="mn-tag manual">Manual</span> You update these</h3>
+        <div id="manual"></div>
+        <button type="button" class="mn-btn mn-wide" id="add-manual">Add a manual account</button>
+        <div id="hist-sec"></div>
         <details class="mn-fold">
           <summary>Bank connection</summary>
           <div class="mn-set">
@@ -86,6 +93,29 @@
           <button type="button" class="mn-btn mn-go" id="t-save">Save and mark reviewed</button>
           <button type="button" class="mn-btn" id="t-hide">Hide</button>
           <button type="button" class="mn-btn" id="t-close">Close</button>
+        </div>
+      </div>
+    </div>
+    <!-- Manual account -->
+    <div class="mn-sheet" id="msheet" hidden>
+      <div class="mn-sheet-card" role="dialog" aria-modal="true" aria-labelledby="m-title">
+        <b id="m-title" class="mn-sheet-title">Manual account</b>
+        <label class="mn-lab" for="m-name">Name</label>
+        <input id="m-name" class="wz-input" maxlength="60" placeholder="e.g. Cold storage">
+        <label class="mn-lab">Holds</label>
+        <div class="mn-chips" id="m-kind">
+          <button type="button" class="mn-chip on" data-kind="btc">Bitcoin</button>
+          <button type="button" class="mn-chip" data-kind="usd">Dollars</button>
+        </div>
+        <label class="mn-lab" for="m-amount" id="m-amount-lab">Amount in BTC</label>
+        <input id="m-amount" class="wz-input" inputmode="decimal" placeholder="0.25">
+        <p class="mn-small" id="m-hint">Valued at the live Bitcoin price. Never type a seed phrase or private key here.</p>
+        <label class="mn-lab" for="m-note">Note</label>
+        <input id="m-note" class="wz-input" maxlength="200" placeholder="Optional">
+        <div class="mn-sheet-btns">
+          <button type="button" class="mn-btn mn-go" id="m-save">Save</button>
+          <button type="button" class="mn-btn" id="m-del" hidden>Delete</button>
+          <button type="button" class="mn-btn" id="m-close">Close</button>
         </div>
       </div>
     </div>

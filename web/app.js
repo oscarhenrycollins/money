@@ -35,7 +35,9 @@ async function loadOverview() {
 /* ---------- review ---------- */
 async function loadList() {
   const q = new URLSearchParams({ limit: 300 });
-  if (el('filter').value === 'todo') q.set('reviewed', 'false');
+  const f = el('filter').value;
+  if (f === 'todo') q.set('reviewed', 'false');
+  if (f === 'bank' || f === 'import') q.set('origin', f);
   if (el('search').value.trim()) q.set('search', el('search').value.trim());
   const r = await api('api/transactions?' + q);
   rows = r.transactions;
@@ -46,7 +48,10 @@ async function loadList() {
     const li = h('li', 'mn-row' + (t.reviewed ? ' is-reviewed' : ''));
     const btn = h('button', 'mn-row-b'); btn.type = 'button'; btn.onclick = () => openSheet(t);
     const left = h('span', 'mn-row-n');
-    left.append(h('b', '', t.merchant || t.description), h('small', '', [t.category || 'Uncategorized', t.account_name].filter(Boolean).join(' · ') + (t.status === 'pending' ? ' · pending' : '')));
+    const sub = h('small', '');
+    if (t.origin === 'import') sub.append(h('span', 'mn-tag import', 'History'), ' ');
+    sub.append([t.category || 'Uncategorized', t.account_name].filter(Boolean).join(' · ') + (t.status === 'pending' ? ' · pending' : ''));
+    left.append(h('b', '', t.merchant || t.description), sub);
     btn.append(left, h('span', 'mn-amt' + (t.amount > 0 ? ' pos' : ''), money(t.amount)));
     const tick = h('button', 'mn-tick' + (t.reviewed ? ' on' : ''), '✓'); tick.type = 'button';
     tick.setAttribute('aria-label', t.reviewed ? 'Mark not reviewed' : 'Mark reviewed');
@@ -63,7 +68,7 @@ async function loadList() {
 function openSheet(t) {
   cur = t; pick = t.category;
   el('t-merchant').textContent = t.merchant || t.description;
-  el('t-meta').textContent = [day(t.date), t.account_name, t.status === 'pending' ? 'pending' : null].filter(Boolean).join(' · ') + (t.description && t.description !== t.merchant ? ' — ' + t.description : '');
+  el('t-meta').textContent = [day(t.date), t.account_name, t.status === 'pending' ? 'pending' : null, 'from ' + t.origin_name].filter(Boolean).join(' · ') + (t.description && t.description !== t.merchant ? ' — ' + t.description : '');
   el('t-amount').textContent = money(t.amount); el('t-amount').classList.toggle('pos', t.amount > 0);
   el('t-name').value = t.merchant || ''; el('t-note').value = t.note || ''; el('t-rule').checked = false;
   el('t-rule-text').textContent = `Always use this for “${(t.merchant || t.description || '').slice(0, 30)}”`;
@@ -154,6 +159,28 @@ function renderAccounts() {
     card.append(ul); box.append(card);
   }
   if (!ov.accounts.length) box.append(h('p', 'mn-empty', ov.syncing ? 'Pulling your accounts…' : 'No accounts yet.'));
+  el('sec-bank').textContent = ov.source_name;
+  el('opt-bank').textContent = 'From ' + ov.source_name;
+  el('opt-import').hidden = !ov.history;
+  if (ov.history) el('opt-import').textContent = ov.history.from_name + ' history';
+  const mb = el('manual'); mb.replaceChildren();
+  if (ov.manual.length) {
+    const card = h('div', 'mn-bank'); const ul = h('ul', 'mn-accts');
+    for (const m of ov.manual) {
+      const li = h('li', 'mn-tap'); li.tabIndex = 0; li.onclick = () => openManual(m);
+      const n = h('span', 'mn-row-n');
+      const sub = m.kind === 'btc' ? `${(+m.amount).toLocaleString(undefined, { maximumFractionDigits: 8 })} BTC` + (m.btc_price ? ` at ${money(m.btc_price)}${m.price_stale ? ' (last known)' : ''}` : ' · price unavailable') : 'Dollars';
+      n.append(h('b', '', m.name), h('small', '', sub + ' · updated ' + day(String(m.updated).slice(0, 10))));
+      li.append(n, h('span', 'mn-amt pos', m.balance == null ? '—' : money(m.balance))); ul.append(li);
+    }
+    card.append(ul); mb.append(card);
+  } else mb.append(h('p', 'mn-small mn-pad', 'For things no bank connection can see, like a cold-storage Bitcoin wallet.'));
+  const hs = el('hist-sec'); hs.replaceChildren();
+  if (ov.history) {
+    hs.append(h('h3', 'mn-sec', ''));
+    hs.firstChild.append(h('span', 'mn-tag import', 'History'), ` Imported from ${ov.history.from_name}`);
+    hs.append(h('p', 'mn-small mn-pad', `Read-only copy from ${day(ov.history.from)}, ${ov.history.showing.toLocaleString()} transactions showing. It stops for each account where ${ov.source_name}'s own data begins, so nothing shows twice.`));
+  }
   const src = el('sources'); src.replaceChildren();
   for (const s of ov.sources) {
     const row = h('label', 'mn-src' + (s.installed ? '' : ' off'));
@@ -172,6 +199,36 @@ function renderAccounts() {
   }
   if (!ov.rules.length) rl.append(h('li', 'mn-small', 'No rules yet. Tick “Always use this” when you categorize something.'));
 }
+/* ---------- manual accounts ---------- */
+let mcur = null, mkind = 'btc';
+function setKind(k) {
+  mkind = k; el('m-kind').querySelectorAll('.mn-chip').forEach((b) => b.classList.toggle('on', b.dataset.kind === k));
+  el('m-amount-lab').textContent = k === 'btc' ? 'Amount in BTC' : 'Balance in dollars';
+  el('m-amount').placeholder = k === 'btc' ? '0.25' : '1000';
+  el('m-hint').hidden = k !== 'btc';
+}
+function openManual(m) {
+  mcur = m || null;
+  el('m-title').textContent = m ? m.name : 'New manual account';
+  el('m-name').value = m ? m.name : ''; el('m-amount').value = m ? m.amount : ''; el('m-note').value = m ? (m.note || '') : '';
+  setKind(m ? m.kind : 'btc'); el('m-del').hidden = !m; el('msheet').hidden = false;
+}
+const closeManual = () => { el('msheet').hidden = true; mcur = null; };
+el('m-kind').querySelectorAll('.mn-chip').forEach((b) => b.onclick = () => setKind(b.dataset.kind));
+el('add-manual').onclick = () => openManual(null);
+el('m-close').onclick = closeManual;
+el('msheet').onclick = (e) => { if (e.target === el('msheet')) closeManual(); };
+el('m-save').onclick = async () => {
+  try {
+    await api('api/manual', { id: mcur?.id, name: el('m-name').value, kind: mkind, amount: el('m-amount').value.replace(/,/g, ''), note: el('m-note').value });
+    closeManual(); say('Saved.', 'note'); refresh();
+  } catch (e) { say(e.message, 'error'); }
+};
+el('m-del').onclick = async () => {
+  if (!mcur || !confirm(`Delete ${mcur.name}?`)) return;
+  try { await api(`api/manual/${mcur.id}/delete`, {}); closeManual(); say('Deleted.', 'note'); refresh(); } catch (e) { say(e.message, 'error'); }
+};
+
 el('sync').onclick = async () => { try { ov = await api('api/sync', {}); say('Refreshing…', 'note'); refresh(); } catch (e) { say(e.message, 'error'); } };
 el('setup-refresh').onclick = () => refresh();
 
@@ -191,11 +248,15 @@ async function refresh() {
 el('filter').onchange = () => loadList().catch((e) => say(e.message, 'error'));
 el('search').oninput = () => { clearTimeout(timer); timer = setTimeout(() => loadList().catch((e) => say(e.message, 'error')), 250); };
 
-window.__wizardCloseOverlay = () => { if (!el('sheet').hidden) { closeSheet(); return true; } return false; };
+window.__wizardCloseOverlay = () => {
+  if (!el('msheet').hidden) { closeManual(); return true; }
+  if (!el('sheet').hidden) { closeSheet(); return true; }
+  return false;
+};
 if (!hosted) {
   history.pushState({ wzGuard: 1 }, '', location.href);
   addEventListener('popstate', () => { window.__wizardCloseOverlay(); history.pushState({ wzGuard: 1 }, '', location.href); });
 }
-addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeManual(); closeSheet(); } });
 showTab(); refresh();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
