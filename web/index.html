@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en" data-app="money">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>Money</title>
+  <script src="boot.js"></script>
+  <link rel="stylesheet" href="wizard-ui.css">
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="theme-client.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="wz-app mn-app">
+    <nav class="mn-tabs" role="tablist">
+      <button type="button" role="tab" data-tab="review" class="is-on">Review <span id="badge" class="mn-badge" hidden></span></button>
+      <button type="button" role="tab" data-tab="spending">Spending</button>
+      <button type="button" role="tab" data-tab="accounts">Accounts</button>
+    </nav>
+    <main class="wz-scroll mn-scroll">
+      <!-- No bank connection yet -->
+      <section id="setup" class="mn-setup" hidden>
+        <b>Connect your bank first</b>
+        <p>Money reads your accounts from a bank connection app. Install <b>SimpleFIN</b> from the App Store, follow its four steps, and your transactions show up here.</p>
+        <button type="button" class="mn-btn mn-go" id="setup-refresh">I've connected it</button>
+      </section>
+
+      <section data-panel="review">
+        <div class="mn-bar">
+          <input id="search" class="wz-input" type="search" placeholder="Search" aria-label="Search transactions">
+          <select id="filter" class="wz-input" aria-label="Show">
+            <option value="todo">To review</option>
+            <option value="all">All</option>
+          </select>
+        </div>
+        <div id="list"></div>
+        <button type="button" class="mn-btn mn-wide" id="all-done" hidden>Mark these reviewed</button>
+        <p id="empty" class="mn-empty" hidden></p>
+      </section>
+
+      <section data-panel="spending" hidden>
+        <div class="mn-month">
+          <button type="button" class="mn-btn mn-sm" id="prev" aria-label="Previous month">‹</button>
+          <b id="month-label"></b>
+          <button type="button" class="mn-btn mn-sm" id="next" aria-label="Next month">›</button>
+        </div>
+        <div class="mn-total"><span>Spent</span><b id="spent"></b></div>
+        <ul id="cats" class="mn-cats"></ul>
+        <p class="mn-small">Refunds and credits count against their category. Transfers and card payments are left out.</p>
+      </section>
+
+      <section data-panel="accounts" hidden>
+        <div id="accts"></div>
+        <details class="mn-fold">
+          <summary>Bank connection</summary>
+          <div class="mn-set">
+            <p class="mn-small">Money reads from one bank connection at a time. Your reviews, categories and notes are kept separately for each.</p>
+            <div id="sources"></div>
+            <p class="mn-small" id="sync-note"></p>
+            <button type="button" class="mn-btn mn-sm" id="sync">Refresh now</button>
+          </div>
+        </details>
+        <details class="mn-fold">
+          <summary>Rules</summary>
+          <div class="mn-set"><ul id="rules" class="mn-rules"></ul></div>
+        </details>
+      </section>
+    </main>
+
+    <!-- One transaction -->
+    <div class="mn-sheet" id="sheet" hidden>
+      <div class="mn-sheet-card" role="dialog" aria-modal="true" aria-labelledby="t-merchant">
+        <div class="mn-sheet-top">
+          <div><b id="t-merchant"></b><small id="t-meta"></small></div>
+          <b id="t-amount" class="mn-amt"></b>
+        </div>
+        <label class="mn-lab">Category</label>
+        <div id="t-cats" class="mn-chips"></div>
+        <label class="mn-check"><input type="checkbox" id="t-rule"> <span id="t-rule-text">Always use this for this merchant</span></label>
+        <label class="mn-lab" for="t-name">Name</label>
+        <input id="t-name" class="wz-input" maxlength="60">
+        <label class="mn-lab" for="t-note">Note</label>
+        <input id="t-note" class="wz-input" maxlength="300" placeholder="Optional">
+        <div class="mn-sheet-btns">
+          <button type="button" class="mn-btn mn-go" id="t-save">Save and mark reviewed</button>
+          <button type="button" class="mn-btn" id="t-hide">Hide</button>
+          <button type="button" class="mn-btn" id="t-close">Close</button>
+        </div>
+      </div>
+    </div>
+    <p id="status" class="wz-status" role="status" aria-live="polite"></p>
+  </div>
+</body>
+</html>

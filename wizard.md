@@ -1,0 +1,43 @@
+---
+wizard: 0.2
+id: money
+name: Money
+type: service
+category: app
+version: 0.1.0
+summary: Review transactions, set categories and rules, and see spending, over your bank connection.
+tags: [finance]
+license: GPL-3.0-only
+source: https://github.com/oscarhenrycollins/money
+runtime:
+  kind: runtipi
+  config: runtipi/config.json
+  compose: runtipi/docker-compose.yml
+api:
+  port: 8809
+  path: /api
+  spec: openapi.json
+mcp:
+  path: /mcp
+  port: 8809
+  transport: streamable-http
+skill: skill/SKILL.md
+view:
+  path: /
+  port: 8809
+  source:
+    path: web
+    build: python3 app/build_view.py
+    dist: web
+provides: [money]
+system: false
+uses: [wizard-simplefin]
+needs: []
+health: /healthz
+---
+
+# Money
+
+A simple money app over your bank connection. Review new transactions with one tap, give them a category and a clearer name, add a note, and tick "always use this" to make a rule for next time. See spending by category for any month, and every account's balance.
+
+Money reads from a bank-connection app on your box: SimpleFIN by default, or Monarch or Teller if you have those. It never changes the bank's data. Your reviews, categories, names, notes and rules live in Money's own database, so a fresh sync never overwrites them, and switching connections keeps each connection's edits.

@@ -1,0 +1,6 @@
+{
+  "request": "A simple Monarch-style money app over my bank connections",
+  "template": "hello-wizard",
+  "state": "private_repo",
+  "name": "Money"
+}

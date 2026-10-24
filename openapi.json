@@ -1,0 +1,16 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "Money", "version": "0.1.0"},
+  "paths": {
+    "/healthz": {"get": {"summary": "Health", "responses": {"200": {"description": "{ok,app,version}"}}}},
+    "/api/overview": {"get": {"summary": "Connection in use, available connections, accounts, review count, categories, rules, last sync", "responses": {"200": {"description": "overview"}}}},
+    "/api/transactions": {"get": {"summary": "Transactions with the owner's layer applied: from, to, account, search, category, reviewed, hidden, min_amount, max_amount, limit", "responses": {"200": {"description": "{count,total,transactions}"}}}},
+    "/api/spending": {"get": {"summary": "Spending by category for month=YYYY-MM", "responses": {"200": {"description": "{month,spent,income,categories}"}}}},
+    "/api/update": {"post": {"summary": "Set reviewed, category, merchant, note, hidden on source+id or ids; optional make_rule+match", "responses": {"200": {"description": "{ok,changed}"}}}},
+    "/api/undo": {"post": {"summary": "Undo the last change", "responses": {"200": {"description": "{ok,undone}"}}}},
+    "/api/source": {"post": {"summary": "Choose which bank-connection app to read ({source})", "responses": {"200": {"description": "overview"}}}},
+    "/api/sync": {"post": {"summary": "Re-read the bank connection now", "responses": {"202": {"description": "overview"}}}},
+    "/api/rules/{id}/delete": {"post": {"summary": "Delete a rule", "responses": {"200": {"description": "{ok}"}}}},
+    "/mcp": {"post": {"summary": "MCP JSON-RPC (box-only): money_overview, money_transactions, money_spending, money_update", "responses": {"200": {"description": "JSON-RPC result"}}}}
+  }
+}

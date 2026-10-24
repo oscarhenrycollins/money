@@ -1,0 +1,621 @@
+"""Money: a simple Monarch-style money app over the box's bank connections.
+
+Reads accounts and transactions from whichever bank-connection apps are installed (SimpleFIN by default; Monarch
+and Teller also work) and keeps the owner's own layer on top in its own database: reviewed state, categories,
+merchant names, notes, hidden transactions and auto-category rules. The connector's data is never changed; a fresh
+sync never overwrites the owner's edits.
+
+Stdlib only. Reads connectors over the box's private app network; offers the same data to the agent through MCP.
+"""
+import datetime as dt
+import json
+import os
+import re
+import sqlite3
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlsplit
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
+APP_ID = 'money'
+VERSION = '0.1.0'
+PREFIX = '/' + APP_ID
+PORT = os.environ.get('PORT', '8809')
+SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
+HISTORY_DAYS = int(os.environ.get('MONEY_HISTORY_DAYS', '730'))
+# Known bank-connection apps, in default order. The first one installed and connected becomes the default source.
+SOURCES = [s.split('=', 1) for s in os.environ.get('MONEY_SOURCES',
+           'wizard-simplefin=http://wizard-simplefin:8808,wizard-monarch=http://wizard-monarch:8806,'
+           'wizard-teller=http://wizard-teller:8805').split(',') if '=' in s]
+NAMES = {'wizard-simplefin': 'SimpleFIN', 'wizard-monarch': 'Monarch', 'wizard-teller': 'Teller'}
+CATEGORIES = ['Groceries', 'Restaurants', 'Coffee', 'Shopping', 'Travel', 'Hotels', 'Flights', 'Rides & Taxis', 'Gas',
+              'Rent', 'Utilities', 'Phone & Internet', 'Subscriptions', 'Health', 'Entertainment', 'Fees', 'Gifts',
+              'Business', 'Income', 'Refunds & Credits', 'Transfer', 'Card Payment', 'Other']
+STATIC = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml'}
+FORWARDED = ('tailscale-user-login', 'x-forwarded-for', 'forwarded', 'x-real-ip', 'cf-connecting-ip')
+LOCK = threading.RLock()
+SYNC_LOCK = threading.Lock()
+SYNCING = threading.Event()
+DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+class Problem(Exception):
+    def __init__(self, code, message):
+        self.code, self.message = code, message
+
+
+# ---------------- storage ----------------
+
+def _private():
+    DATA.mkdir(parents=True, exist_ok=True)
+    os.chmod(DATA, 0o700)
+    return DATA
+
+
+def db():
+    c = sqlite3.connect(_private() / 'money.sqlite3', timeout=15)
+    c.row_factory = sqlite3.Row
+    c.executescript('''
+      CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT);
+      CREATE TABLE IF NOT EXISTS accounts (source TEXT, id TEXT, institution TEXT, name TEXT, last_four TEXT, type TEXT,
+        currency TEXT, balance REAL, balance_at TEXT, PRIMARY KEY (source, id));
+      CREATE TABLE IF NOT EXISTS tx (source TEXT, id TEXT, account TEXT, date TEXT, amount REAL, description TEXT,
+        merchant TEXT, source_category TEXT, status TEXT, seen TEXT, PRIMARY KEY (source, id));
+      CREATE INDEX IF NOT EXISTS tx_date ON tx(source, date);
+      CREATE TABLE IF NOT EXISTS edits (source TEXT, id TEXT, reviewed INTEGER, category TEXT, merchant TEXT,
+        note TEXT, hidden INTEGER, at TEXT, PRIMARY KEY (source, id));
+      CREATE TABLE IF NOT EXISTS rules (id INTEGER PRIMARY KEY AUTOINCREMENT, match TEXT NOT NULL, category TEXT NOT NULL,
+        merchant TEXT, created TEXT);
+      CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, pos INTEGER);
+      CREATE TABLE IF NOT EXISTS log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, source TEXT, tx TEXT, before TEXT);
+    ''')
+    if not c.execute('SELECT 1 FROM categories LIMIT 1').fetchone():
+        with c:
+            c.executemany('INSERT INTO categories VALUES (?,?)', [(n, i) for i, n in enumerate(CATEGORIES)])
+    os.chmod(DATA / 'money.sqlite3', 0o600)
+    return c
+
+
+def _now():
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+
+def _setting(c, k, default=None):
+    r = c.execute('SELECT v FROM settings WHERE k=?', (k,)).fetchone()
+    return json.loads(r[0]) if r else default
+
+
+def _set(c, k, v):
+    c.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', (k, json.dumps(v)))
+
+
+# ---------------- connectors ----------------
+
+def _get(base, path, query=None, timeout=30):
+    url = base.rstrip('/') + path + ('?' + urlencode(query) if query else '')
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={'Accept': 'application/json'}), timeout=timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get('error')
+        except ValueError:
+            msg = None
+        raise Problem(502, msg or f'The bank connection answered {e.code}.') from None
+    except (OSError, ValueError):
+        raise Problem(502, 'Could not reach that bank connection app.') from None
+
+
+def sources():
+    """Every known connector, whether it's installed (reachable) and whether it's connected to a bank."""
+    out = []
+    for sid, base in SOURCES:
+        s = {'id': sid, 'name': NAMES.get(sid, sid), 'installed': False, 'connected': False, 'banks': 0, 'last_sync': None}
+        try:
+            st = _get(base, '/api/status', timeout=4)
+            s.update(installed=True, connected=st.get('status') == 'connected' or bool(st.get('banks')),
+                     banks=len(st.get('banks') or []), last_sync=st.get('last_sync'))
+        except Problem:
+            pass
+        out.append(s)
+    return out
+
+
+def active_source(c=None, srcs=None):
+    own = c is None
+    c = c or db()
+    try:
+        chosen = _setting(c, 'source')
+    finally:
+        if own:
+            c.close()
+    if chosen:
+        return chosen
+    srcs = srcs if srcs is not None else sources()
+    return next((s['id'] for s in srcs if s['connected']), next((s['id'] for s in srcs if s['installed']), SOURCES[0][0]))
+
+
+def _num(v):
+    try:
+        return round(float(v), 2) if v not in (None, '') else None
+    except (TypeError, ValueError):
+        return None
+
+
+def sync(source=None):
+    if not SYNC_LOCK.acquire(blocking=False):
+        raise Problem(409, 'Already syncing.')
+    SYNCING.set()
+    try:
+        source = source or active_source()
+        base = dict(SOURCES).get(source)
+        if not base:
+            raise Problem(400, 'Unknown bank connection.')
+        accts = _get(base, '/api/accounts').get('accounts') or []
+        # Page newest -> oldest by date (connectors return at most 1000 rows per call).
+        since = (dt.date.today() - dt.timedelta(days=HISTORY_DAYS)).isoformat()
+        rows, to, guard = {}, None, 0
+        while guard < 40:
+            q = {'limit': 1000, 'from': since, **({'to': to} if to else {})}
+            batch = _get(base, '/api/transactions', q, timeout=60).get('transactions') or []
+            new = [t for t in batch if t['id'] not in rows]
+            for t in new:
+                rows[t['id']] = t
+            guard += 1
+            if len(batch) < 1000 or not new:
+                break
+            to = min(t['date'] for t in batch if t.get('date'))
+        now = _now()
+        with LOCK:
+            c = db()
+            try:
+                with c:
+                    c.execute('DELETE FROM accounts WHERE source=?', (source,))
+                    for a in accts:
+                        bal = a.get('balance') if 'balance' in a else (a.get('ledger') if a.get('ledger') is not None else a.get('available'))
+                        c.execute('INSERT OR REPLACE INTO accounts VALUES (?,?,?,?,?,?,?,?,?)', (
+                            source, str(a['id']), a.get('institution'), a.get('name'), a.get('last_four'),
+                            a.get('type') or ('credit' if re.search(r'card|credit', str(a.get('name')), re.I) else None),
+                            a.get('currency') or 'USD', _num(bal), a.get('balance_at')))
+                    for t in rows.values():
+                        c.execute('''INSERT INTO tx VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,id) DO UPDATE SET
+                          account=excluded.account, date=excluded.date, amount=excluded.amount, description=excluded.description,
+                          merchant=excluded.merchant, source_category=excluded.source_category, status=excluded.status, seen=excluded.seen''', (
+                            source, str(t['id']), str(t.get('account')), t.get('date'), _num(t.get('amount')),
+                            (t.get('description') or '')[:200], (t.get('counterparty') or None), t.get('category'),
+                            t.get('status') or 'posted', now))
+                    # A pending charge that posted under a new id disappears from the connector: drop it here too.
+                    if rows:
+                        c.execute("DELETE FROM tx WHERE source=? AND status='pending' AND seen<>?", (source, now))
+                    _set(c, 'last_sync', now)
+                    _set(c, 'last_error', None)
+            finally:
+                c.close()
+        return {'source': source, 'accounts': len(accts), 'transactions': len(rows)}
+    except Problem as e:
+        c = db()
+        try:
+            with c:
+                _set(c, 'last_error', e.message)
+        finally:
+            c.close()
+        raise
+    finally:
+        SYNCING.clear()
+        SYNC_LOCK.release()
+
+
+def start_sync():
+    def run():
+        try:
+            sync()
+        except Problem:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _scheduler():
+    while True:
+        try:
+            c = db()
+            try:
+                last = _setting(c, 'last_sync')
+            finally:
+                c.close()
+            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.strptime(last, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)).total_seconds() if last else 1e9
+            if age > SYNC_MINUTES * 60 and not SYNCING.is_set():
+                sync()
+        except Exception:  # noqa: BLE001 - keep scheduling after a failed sync
+            pass
+        time.sleep(60)
+
+
+# ---------------- the owner's layer ----------------
+
+def _rules(c):
+    return [dict(r) for r in c.execute('SELECT id,match,category,merchant FROM rules ORDER BY id')]
+
+
+def _apply_rules(t, rules):
+    text = f"{t.get('merchant') or ''} {t.get('description') or ''}".lower()
+    for r in rules:
+        if r['match'].lower() in text:
+            return r
+    return None
+
+
+def _view(row, rules):
+    t = dict(row)
+    rule = _apply_rules(t, rules)
+    t['category'] = t.pop('e_category') or (rule and rule['category']) or t.get('source_category')
+    t['category_from'] = 'you' if row['e_category'] else 'rule' if rule else 'bank' if t.get('source_category') else None
+    t['merchant'] = t.pop('e_merchant') or (rule and rule['merchant']) or t.get('merchant') or _tidy(t.get('description'))
+    t['reviewed'] = bool(t.pop('reviewed'))
+    t['hidden'] = bool(t.pop('hidden'))
+    return t
+
+
+def _tidy(desc):
+    d = re.sub(r'\s{2,}', ' ', re.sub(r'[#*]\S+|\b\d{4,}\b', '', str(desc or ''))).strip()
+    return d[:60].title() if d.isupper() else d[:60]
+
+
+SELECT = '''SELECT t.source, t.id, t.account, a.institution, a.name AS account_name, a.last_four, t.date, t.amount,
+  t.description, t.merchant, t.source_category, t.status, COALESCE(e.reviewed,0) AS reviewed, e.category AS e_category,
+  e.merchant AS e_merchant, e.note, COALESCE(e.hidden,0) AS hidden
+  FROM tx t LEFT JOIN accounts a ON a.source=t.source AND a.id=t.account LEFT JOIN edits e ON e.source=t.source AND e.id=t.id'''
+
+
+def transactions(args, c=None):
+    own = c is None
+    c = c or db()
+    try:
+        src = active_source(c)
+        q, p = [SELECT + ' WHERE t.source=?'], [src]
+        for key, op in (('from', '>='), ('to', '<=')):
+            v = args.get(key)
+            if v:
+                if not DATE_RE.match(str(v)):
+                    raise Problem(400, f'{key} must be YYYY-MM-DD.')
+                q.append(f'AND t.date {op} ?'); p.append(v)
+        if args.get('account'):
+            v = str(args['account'])[:60]
+            q.append('AND (t.account=? OR a.last_four=? OR a.name LIKE ?)'); p += [v, v, '%' + v + '%']
+        if args.get('reviewed') in (True, False, 'true', 'false'):
+            q.append('AND COALESCE(e.reviewed,0)=?'); p.append(1 if args['reviewed'] in (True, 'true') else 0)
+        if str(args.get('hidden')) not in ('true', 'True'):
+            q.append('AND COALESCE(e.hidden,0)=0')
+        for key, op in (('min_amount', '>='), ('max_amount', '<=')):
+            if args.get(key) not in (None, ''):
+                q.append(f'AND t.amount {op} ?'); p.append(float(args[key]))
+        limit = max(1, min(int(args.get('limit') or 200), 2000))
+        q.append('ORDER BY t.date DESC, t.id DESC')
+        rules = _rules(c)
+        rows = [_view(r, rules) for r in c.execute(' '.join(q), p)]
+        if args.get('search'):
+            s = str(args['search'])[:80].lower()
+            rows = [r for r in rows if any(s in str(r.get(k) or '').lower() for k in ('merchant', 'description', 'note', 'category', 'account_name'))]
+        if args.get('category'):
+            want = str(args['category']).lower()
+            rows = [r for r in rows if (r['category'] or 'Uncategorized').lower() == want]
+        return {'count': len(rows[:limit]), 'total': len(rows), 'transactions': rows[:limit]}
+    finally:
+        if own:
+            c.close()
+
+
+def update(body):
+    src, tid = str(body.get('source') or ''), str(body.get('id') or '')
+    ids = body.get('ids') if isinstance(body.get('ids'), list) else [tid]
+    fields = {k: body[k] for k in ('reviewed', 'category', 'merchant', 'note', 'hidden') if k in body}
+    if not fields:
+        raise Problem(400, 'Nothing to change.')
+    for k in ('category', 'merchant', 'note'):
+        if k in fields and fields[k] is not None:
+            fields[k] = str(fields[k]).strip()[:300 if k == 'note' else 60] or None
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                if 'category' in fields and fields['category'] and not c.execute('SELECT 1 FROM categories WHERE name=?', (fields['category'],)).fetchone():
+                    c.execute('INSERT INTO categories VALUES (?, (SELECT COALESCE(MAX(pos),0)+1 FROM categories))', (fields['category'],))
+                for i in ids[:500]:
+                    i = str(i)
+                    if not c.execute('SELECT 1 FROM tx WHERE source=? AND id=?', (src, i)).fetchone():
+                        raise Problem(404, 'No such transaction.')
+                    old = c.execute('SELECT reviewed,category,merchant,note,hidden FROM edits WHERE source=? AND id=?', (src, i)).fetchone()
+                    c.execute('INSERT INTO log(at,source,tx,before) VALUES (?,?,?,?)', (_now(), src, i, json.dumps(dict(old) if old else None)))
+                    cur = dict(old) if old else {'reviewed': 0, 'category': None, 'merchant': None, 'note': None, 'hidden': 0}
+                    for k, v in fields.items():
+                        cur[k] = (1 if v else 0) if k in ('reviewed', 'hidden') else v
+                    c.execute('INSERT OR REPLACE INTO edits VALUES (?,?,?,?,?,?,?,?)', (src, i, cur['reviewed'], cur['category'], cur['merchant'], cur['note'], cur['hidden'], _now()))
+                if body.get('make_rule') and fields.get('category'):
+                    match = str(body.get('match') or '').strip()[:60]
+                    if len(match) < 3:
+                        raise Problem(400, 'A rule needs at least 3 letters to match.')
+                    c.execute('INSERT INTO rules(match,category,merchant,created) VALUES (?,?,?,?)', (match, fields['category'], fields.get('merchant'), _now()))
+        finally:
+            c.close()
+    return {'ok': True, 'changed': len(ids)}
+
+
+def undo():
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                last = c.execute('SELECT id,at FROM log ORDER BY id DESC LIMIT 1').fetchone()
+                if not last:
+                    raise Problem(409, 'Nothing to undo.')
+                batch = c.execute('SELECT id,source,tx,before FROM log WHERE at=? ORDER BY id DESC', (last['at'],)).fetchall()
+                for r in batch:
+                    b = json.loads(r['before']) if r['before'] else None
+                    if b:
+                        c.execute('INSERT OR REPLACE INTO edits VALUES (?,?,?,?,?,?,?,?)', (r['source'], r['tx'], b['reviewed'], b['category'], b['merchant'], b['note'], b['hidden'], _now()))
+                    else:
+                        c.execute('DELETE FROM edits WHERE source=? AND id=?', (r['source'], r['tx']))
+                    c.execute('DELETE FROM log WHERE id=?', (r['id'],))
+        finally:
+            c.close()
+    return {'ok': True, 'undone': len(batch)}
+
+
+def rule_delete(rid):
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                if not c.execute('DELETE FROM rules WHERE id=?', (int(rid),)).rowcount:
+                    raise Problem(404, 'No such rule.')
+        finally:
+            c.close()
+    return {'ok': True}
+
+
+def set_source(body):
+    sid = body.get('source')
+    if sid not in dict(SOURCES):
+        raise Problem(400, 'Unknown bank connection.')
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                _set(c, 'source', sid)
+                _set(c, 'last_sync', None)
+        finally:
+            c.close()
+    start_sync()
+    return overview()
+
+
+# ---------------- summaries ----------------
+
+def _month_bounds(month):
+    if month and not re.match(r'^\d{4}-\d{2}$', str(month)):
+        raise Problem(400, 'month must be YYYY-MM.')
+    d = dt.date.fromisoformat((month or dt.date.today().strftime('%Y-%m')) + '-01')
+    nxt = (d + dt.timedelta(days=32)).replace(day=1)
+    return d.isoformat(), (nxt - dt.timedelta(days=1)).isoformat(), d.strftime('%Y-%m')
+
+
+SKIP = {'transfer', 'card payment', 'credit card payment'}
+
+
+def spending(month=None):
+    start, end, label = _month_bounds(month)
+    rows = transactions({'from': start, 'to': end, 'limit': 2000})['transactions']
+    cats, income, spent = {}, 0.0, 0.0
+    for t in rows:
+        cat = t['category'] or 'Uncategorized'
+        if cat.lower() in SKIP or t['amount'] is None:
+            continue
+        if t['amount'] > 0 and cat.lower() in ('income', 'business income', 'other income', 'va income'):
+            income += t['amount']
+            continue
+        cats[cat] = cats.get(cat, 0) - t['amount']   # refunds and credits net against spending
+    cats = {k: round(v, 2) for k, v in cats.items() if abs(v) >= 0.005}
+    spent = round(sum(v for v in cats.values() if v > 0), 2)
+    return {'month': label, 'spent': spent, 'income': round(income, 2),
+            'categories': sorted(({'category': k, 'amount': v} for k, v in cats.items()), key=lambda x: -x['amount'])}
+
+
+def overview():
+    srcs = sources()
+    c = db()
+    try:
+        src = active_source(c, srcs)
+        accts = [dict(r) for r in c.execute('SELECT id,institution,name,last_four,type,currency,balance,balance_at FROM accounts WHERE source=? ORDER BY institution,name', (src,))]
+        to_review = c.execute('SELECT COUNT(*) FROM tx t LEFT JOIN edits e ON e.source=t.source AND e.id=t.id WHERE t.source=? AND COALESCE(e.reviewed,0)=0 AND COALESCE(e.hidden,0)=0', (src,)).fetchone()[0]
+        n = c.execute('SELECT COUNT(*) FROM tx WHERE source=?', (src,)).fetchone()[0]
+        cats = [r[0] for r in c.execute('SELECT name FROM categories ORDER BY pos')]
+        out = {'source': src, 'source_name': NAMES.get(src, src), 'sources': srcs, 'chosen': bool(_setting(c, 'source')),
+               'accounts': accts, 'to_review': to_review, 'transactions': n, 'categories': cats, 'rules': _rules(c),
+               'last_sync': _setting(c, 'last_sync'), 'error': _setting(c, 'last_error'), 'syncing': SYNCING.is_set()}
+    finally:
+        c.close()
+    cash = sum(a['balance'] or 0 for a in accts if (a['type'] or '') in ('depository', 'checking', 'savings') or re.search(r'check|saving|ckg', (a['name'] or ''), re.I))
+    out['cash'] = round(cash, 2)
+    return out
+
+
+# ---------------- MCP ----------------
+
+TOOLS = [
+    {'name': 'money_overview', 'description': "Money app overview: which bank connection it reads (SimpleFIN by default), accounts with balances, how many transactions still need review, categories and auto-category rules, last sync.",
+     'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
+    {'name': 'money_transactions', 'description': "Search transactions with the owner's categories, merchant names, notes and reviewed state applied. Filters: from/to (YYYY-MM-DD), account (id, last digits or name), search, category, reviewed (true/false), min_amount/max_amount, limit (default 200). Negative = money out.",
+     'inputSchema': {'type': 'object', 'properties': {'from': {'type': 'string'}, 'to': {'type': 'string'}, 'account': {'type': 'string'}, 'search': {'type': 'string'}, 'category': {'type': 'string'},
+                     'reviewed': {'type': 'boolean'}, 'min_amount': {'type': 'number'}, 'max_amount': {'type': 'number'}, 'limit': {'type': 'integer'}}, 'additionalProperties': False},
+     'annotations': {'readOnlyHint': True}},
+    {'name': 'money_spending', 'description': 'Spending by category for a month (YYYY-MM, default this month); refunds and credits net against their category; transfers and card payments excluded.',
+     'inputSchema': {'type': 'object', 'properties': {'month': {'type': 'string'}}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
+    {'name': 'money_update', 'description': "Change the owner's layer on transactions (never the bank's data): reviewed, category, merchant, note, hidden. Pass source and id (or ids for several). With make_rule true and match text, also saves a rule so future matching transactions get that category. Only do this when the owner asked.",
+     'inputSchema': {'type': 'object', 'properties': {'source': {'type': 'string'}, 'id': {'type': 'string'}, 'ids': {'type': 'array', 'items': {'type': 'string'}}, 'reviewed': {'type': 'boolean'},
+                     'category': {'type': 'string'}, 'merchant': {'type': 'string'}, 'note': {'type': 'string'}, 'hidden': {'type': 'boolean'}, 'make_rule': {'type': 'boolean'}, 'match': {'type': 'string'}},
+                     'required': ['source'], 'additionalProperties': False},
+     'annotations': {'readOnlyHint': False, 'destructiveHint': False}},
+]
+
+
+def rpc(msg):
+    if not isinstance(msg, dict):
+        return {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600, 'message': 'Expected a JSON-RPC object.'}}
+    m, i, p = msg.get('method'), msg.get('id'), msg.get('params') or {}
+    if 'id' not in msg:
+        return None
+    try:
+        if m == 'initialize':
+            r = {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': APP_ID, 'version': VERSION}}
+        elif m == 'tools/list':
+            r = {'tools': TOOLS}
+        elif m == 'tools/call':
+            a, n = p.get('arguments') or {}, p.get('name')
+            fn = {'money_overview': lambda: overview(), 'money_transactions': lambda: transactions(a),
+                  'money_spending': lambda: spending(a.get('month')), 'money_update': lambda: update(a)}.get(n)
+            if not fn:
+                return {'jsonrpc': '2.0', 'id': i, 'error': {'code': -32602, 'message': 'Unknown tool.'}}
+            v = fn()
+            r = {'content': [{'type': 'text', 'text': json.dumps(v, ensure_ascii=False)}], 'structuredContent': v, 'isError': False}
+        elif m == 'ping':
+            r = {}
+        else:
+            return {'jsonrpc': '2.0', 'id': i, 'error': {'code': -32601, 'message': 'Unknown method.'}}
+    except Problem as e:
+        r = {'content': [{'type': 'text', 'text': e.message}], 'isError': True}
+    except (ValueError, TypeError):
+        r = {'content': [{'type': 'text', 'text': 'Invalid arguments.'}], 'isError': True}
+    return {'jsonrpc': '2.0', 'id': i, 'result': r}
+
+
+# ---------------- HTTP ----------------
+
+def _csv(name):
+    return {x.strip().lower() for x in os.environ.get(name, '').split(',') if x.strip()}
+
+
+_LOOPBACK = {f'127.0.0.1:{PORT}', f'localhost:{PORT}', f'{APP_ID}:{PORT}'}
+TRUSTED_HOSTS = _csv('WIZARD_TRUSTED_HOSTS') | _LOOPBACK
+TRUSTED_ORIGINS = _csv('WIZARD_TRUSTED_ORIGINS') | {'http://' + h for h in _LOOPBACK}
+CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
+
+
+class Handler(BaseHTTPRequestHandler):
+    def refused(self, write=False):
+        if (self.headers.get('Host') or '').lower() not in TRUSTED_HOSTS:
+            self.send(403, {'error': 'Unknown host.'}); return True
+        origin = (self.headers.get('Origin') or '').lower()
+        if origin and origin not in TRUSTED_ORIGINS:
+            self.send(403, {'error': 'Cross-origin request refused.'}); return True
+        if write and not origin and (self.headers.get('Sec-Fetch-Site') or '') == 'cross-site':
+            self.send(403, {'error': 'Cross-origin request refused.'}); return True
+        return False
+
+    def send(self, code, body=None, kind='application/json'):
+        b = body if isinstance(body, bytes) else b'' if body is None else json.dumps(body, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header('Content-Type', kind)
+        self.send_header('Content-Length', str(len(b)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('Content-Security-Policy', CSP)
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(b)
+
+    def route(self):
+        p = urlsplit(self.path).path
+        return '/' if p == PREFIX else p[len(PREFIX):] if p.startswith(PREFIX + '/') else p
+
+    def body(self):
+        if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+            raise Problem(415, 'Use application/json.')
+        size = int(self.headers.get('Content-Length', '0') or 0)
+        if not 0 <= size <= 262144:
+            raise Problem(413, 'Request too large.')
+        try:
+            d = json.loads(self.rfile.read(size) or b'{}')
+        except ValueError:
+            raise Problem(400, 'Invalid JSON.') from None
+        if not isinstance(d, dict):
+            raise Problem(400, 'Expected a JSON object.')
+        return d
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_GET(self):
+        if self.refused():
+            return
+        path, q = self.route(), {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+        try:
+            if path in ('/healthz', '/api/health'):
+                return self.send(200, {'ok': True, 'app': APP_ID, 'version': VERSION})
+            if path == '/api/overview':
+                return self.send(200, overview())
+            if path == '/api/transactions':
+                return self.send(200, transactions(q))
+            if path == '/api/spending':
+                return self.send(200, spending(q.get('month')))
+            if path == '/openapi.json':
+                return self.send(200, (ROOT / 'openapi.json').read_bytes())
+            name = 'index.html' if path == '/' else path[1:]
+            kind = STATIC.get(Path(name).suffix)
+            if kind and '/' not in name and not name.startswith('.') and (ROOT / 'web' / name).is_file():
+                return self.send(200, (ROOT / 'web' / name).read_bytes(), kind)
+            self.send(405 if path == '/mcp' else 404, {'error': 'Use POST /mcp.' if path == '/mcp' else 'Not found.'})
+        except Problem as e:
+            self.send(e.code, {'error': e.message})
+        except (ValueError, TypeError):
+            self.send(400, {'error': 'Invalid query.'})
+
+    def do_POST(self):
+        if self.refused(write=True):
+            return
+        path = self.route()
+        try:
+            if path == '/mcp':
+                if any(self.headers.get(h) for h in FORWARDED):
+                    return self.send(403, {'error': 'MCP is box-only.'})
+                out = rpc(self.body())
+                return self.send(202 if out is None else 200, out)
+            b = self.body()
+            if path == '/api/update':
+                return self.send(200, update(b))
+            if path == '/api/undo':
+                return self.send(200, undo())
+            if path == '/api/source':
+                return self.send(200, set_source(b))
+            if path == '/api/sync':
+                if not SYNCING.is_set():
+                    start_sync()
+                time.sleep(0.2)
+                return self.send(202, overview())
+            m = re.fullmatch(r'/api/rules/(\d{1,9})/delete', path)
+            if m:
+                return self.send(200, rule_delete(m.group(1)))
+            self.send(404, {'error': 'Not found.'})
+        except Problem as e:
+            self.send(e.code, {'error': e.message})
+        except (ValueError, TypeError):
+            self.send(400, {'error': 'Invalid request.'})
+
+    def log_message(self, *a):
+        pass
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    for f in _private().rglob('*'):
+        try:
+            os.chmod(f, 0o700 if f.is_dir() else 0o600)
+        except OSError:
+            pass
+    db().close()
+    threading.Thread(target=_scheduler, daemon=True).start()
+    ThreadingHTTPServer((os.environ.get('BIND', '0.0.0.0'), int(PORT)), Handler).serve_forever()
