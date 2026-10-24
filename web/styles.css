@@ -4,7 +4,7 @@ html[data-color-scheme="light"] .mn-app { --base: #f7f6fb; --green: #18834f; --a
 .mn-app [hidden] { display: none !important; }
 
 /* Bottom tabs, in thumb reach (same pattern as Card Benefits) */
-.mn-tabs { flex: none; display: grid; grid-template-columns: repeat(3, 1fr); padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--line); background: var(--base); }
+.mn-tabs { flex: none; display: grid; grid-template-columns: repeat(4, 1fr); padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--line); background: var(--base); }
 .mn-tabs button { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 50px; border: 0; background: none; font: inherit; font-size: 11.5px; font-weight: 650; color: var(--ink-3); cursor: pointer; }
 .mn-tabs svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .mn-tabs button.is-on { color: var(--accent); }
@@ -102,3 +102,18 @@ html.wz-hosted .mn-tabs button { min-height: 44px; gap: 1px; }
 .mn-pad { margin: 0 4px 6px; }
 .mn-tap { cursor: pointer; }
 .mn-sheet-title { font-size: 17px; }
+
+/* Net worth */
+.mn-nw { display: flex; flex-direction: column; gap: 4px; padding: 16px; border-radius: 16px; background: var(--solid); }
+.mn-nw > span { font-size: 13.5px; color: var(--ink-3); }
+.mn-nw > b { font-size: 32px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.mn-nw > b.neg { color: var(--ink); }
+.mn-nw-split { display: flex; gap: 18px; font-size: 13px; color: var(--ink-3); }
+.mn-nw-split b { margin-left: 4px; font-variant-numeric: tabular-nums; color: var(--ink); }
+.mn-nw-split b.pos { color: var(--green); }
+.mn-chart { margin-top: 10px; }
+.mn-chart svg { display: block; width: 100%; height: 120px; }
+.mn-line { fill: none; stroke: var(--accent); stroke-width: 2.2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.mn-zero { stroke: var(--line-2); stroke-width: 1; stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; }
+.mn-chart-x { display: flex; justify-content: space-between; margin-top: 4px; font-size: 11.5px; color: var(--ink-3); }
+.mn-range { margin-top: 8px; }

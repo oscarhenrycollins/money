@@ -47,6 +47,22 @@
         <p class="mn-small">Refunds and credits count against their category. Transfers and card payments are left out.</p>
       </section>
 
+      <section data-panel="networth" hidden>
+        <div class="mn-nw">
+          <span>Net worth</span>
+          <b id="nw-total"></b>
+          <div class="mn-nw-split"><span>Assets <b id="nw-assets" class="pos"></b></span><span>Owed <b id="nw-debts"></b></span></div>
+          <div id="nw-chart" class="mn-chart"></div>
+          <div id="nw-range" class="mn-chips mn-range">
+            <button type="button" class="mn-chip on" data-range="ytd">This year</button>
+            <button type="button" class="mn-chip" data-range="90">90 days</button>
+            <button type="button" class="mn-chip" data-range="all">All</button>
+          </div>
+        </div>
+        <div id="nw-list"></div>
+        <p class="mn-small">Imported balances are as of the import and drop off once SimpleFIN has that account.</p>
+      </section>
+
       <section data-panel="accounts" hidden>
         <h3 class="mn-sec"><span class="mn-tag bank" id="sec-bank">SimpleFIN</span> Synced from your banks</h3>
         <div id="accts"></div>
@@ -72,6 +88,7 @@
     <nav class="mn-tabs" role="tablist" aria-label="Views">
       <button type="button" role="tab" data-tab="review" class="is-on"><svg viewBox="0 0 24 24"><path d="M5 12l4 4 10-10"/></svg><span>Review</span><i id="badge" class="mn-badge" hidden></i></button>
       <button type="button" role="tab" data-tab="spending"><svg viewBox="0 0 24 24"><path d="M4 20V10 M10 20V4 M16 20v-7 M22 20H2"/></svg><span>Spending</span></button>
+      <button type="button" role="tab" data-tab="networth"><svg viewBox="0 0 24 24"><path d="M3 17l6-6 4 4 8-8 M15 7h6v6"/></svg><span>Net worth</span></button>
       <button type="button" role="tab" data-tab="accounts"><svg viewBox="0 0 24 24"><path d="M3 10l9-6 9 6 M5 10v8 M9.5 10v8 M14.5 10v8 M19 10v8 M3 20h18"/></svg><span>Accounts</span></button>
     </nav>
 

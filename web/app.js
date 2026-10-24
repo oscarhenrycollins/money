@@ -144,6 +144,49 @@ function renderRows(title) {
 el('prev').onclick = () => { const d = new Date(month + '-15'); d.setMonth(d.getMonth() - 1); month = d.toISOString().slice(0, 7); loadSpending(); };
 el('next').onclick = () => { const d = new Date(month + '-15'); d.setMonth(d.getMonth() + 1); month = d.toISOString().slice(0, 7); loadSpending(); };
 
+/* ---------- net worth ---------- */
+let nwRange = 'ytd', nwData = null;
+const TAG = { bank: 'bank', manual: 'manual', import: 'import' };
+async function loadNetWorth() {
+  nwData = await api('api/networth');
+  el('nw-total').textContent = money(nwData.net_worth);
+  el('nw-total').classList.toggle('neg', nwData.net_worth < 0);
+  el('nw-assets').textContent = money(nwData.assets);
+  el('nw-debts').textContent = money(nwData.liabilities);
+  drawChart();
+  const box = el('nw-list'); box.replaceChildren();
+  for (const [title, list] of [['Assets', nwData.accounts.filter((a) => a.balance > 0)], ['Owed', nwData.accounts.filter((a) => a.balance < 0)]]) {
+    if (!list.length) continue;
+    box.append(h('h3', 'mn-sec', title));
+    const card = h('div', 'mn-bank'); const ul = h('ul', 'mn-accts');
+    for (const a of list) {
+      const li = h('li'); const n = h('span', 'mn-row-n');
+      const sub = h('small', ''); sub.append(h('span', 'mn-tag ' + TAG[a.origin], a.origin === 'import' ? 'History' : a.origin_name), ' ', [a.detail, a.institution !== 'Manual' ? a.institution : null, a.origin === 'import' && a.as_of ? 'as of ' + day(String(a.as_of).slice(0, 10)) : null].filter(Boolean).join(' · '));
+      n.append(h('b', '', a.name), sub);
+      li.append(n, h('span', 'mn-amt' + (a.balance > 0 ? ' pos' : ''), money(a.balance))); ul.append(li);
+    }
+    card.append(ul); box.append(card);
+  }
+}
+function drawChart() {
+  const box = el('nw-chart'); box.replaceChildren();
+  let pts = (nwData?.history || []).map((p) => ({ d: p.date, v: p.value }));
+  const today = new Date(); const cut = nwRange === 'ytd' ? `${today.getFullYear()}-01-01` : nwRange === '90' ? new Date(today - 90 * 864e5).toISOString().slice(0, 10) : '0000';
+  pts = pts.filter((p) => p.d >= cut);
+  if (pts.length < 2) { box.append(h('p', 'mn-small', 'The chart fills in as days go by.')); return; }
+  const W = 320, H = 110, P = 6, t0 = Date.parse(pts[0].d), t1 = Date.parse(pts[pts.length - 1].d) || t0 + 1;
+  const lo = Math.min(0, ...pts.map((p) => p.v)), hi = Math.max(0, ...pts.map((p) => p.v)) || 1;
+  const x = (d) => P + (Date.parse(d) - t0) / Math.max(1, t1 - t0) * (W - 2 * P);
+  const y = (v) => P + (hi - v) / Math.max(1, hi - lo) * (H - 2 * P);
+  const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('preserveAspectRatio', 'none'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', 'Net worth over time');
+  const zero = document.createElementNS(NS, 'line'); zero.setAttribute('x1', 0); zero.setAttribute('x2', W); zero.setAttribute('y1', y(0)); zero.setAttribute('y2', y(0)); zero.setAttribute('class', 'mn-zero');
+  const line = document.createElementNS(NS, 'polyline'); line.setAttribute('points', pts.map((p) => `${x(p.d).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ')); line.setAttribute('class', 'mn-line');
+  svg.append(zero, line); box.append(svg);
+  const lab = h('div', 'mn-chart-x'); lab.append(h('span', '', day(pts[0].d)), h('span', '', day(pts[pts.length - 1].d))); box.append(lab);
+}
+el('nw-range').querySelectorAll('.mn-chip').forEach((b) => b.onclick = () => { nwRange = b.dataset.range; el('nw-range').querySelectorAll('.mn-chip').forEach((x) => x.classList.toggle('on', x === b)); drawChart(); });
+
 /* ---------- accounts ---------- */
 function renderAccounts() {
   const box = el('accts'); box.replaceChildren();
@@ -243,6 +286,7 @@ async function refresh() {
     await loadOverview();
     if (tab === 'review') await loadList();
     if (tab === 'spending') await loadSpending();
+    if (tab === 'networth') await loadNetWorth();
   } catch (e) { say(e.message, 'error'); }
 }
 el('filter').onchange = () => loadList().catch((e) => say(e.message, 'error'));

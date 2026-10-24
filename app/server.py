@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -73,6 +73,7 @@ def db():
         merchant TEXT, created TEXT);
       CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY, pos INTEGER);
       CREATE TABLE IF NOT EXISTS log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, source TEXT, tx TEXT, before TEXT);
+      CREATE TABLE IF NOT EXISTS networth (date TEXT PRIMARY KEY, value REAL, assets REAL, liabilities REAL, origin TEXT);
       CREATE TABLE IF NOT EXISTS manual (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, amount REAL,
         note TEXT, updated TEXT);
     ''')
@@ -232,6 +233,7 @@ def _scheduler():
             age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.strptime(last, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)).total_seconds() if last else 1e9
             if age > SYNC_MINUTES * 60 and not SYNCING.is_set():
                 sync()
+                networth()
         except Exception:  # noqa: BLE001 - keep scheduling after a failed sync
             pass
         time.sleep(60)
@@ -505,13 +507,23 @@ def import_history(body):
                                       _num(a.get('ledger') if a.get('ledger') is not None else a.get('balance')), f'Copied from {NAMES.get(sid, sid)}', now))
                             made += 1
                         continue
+                    bal = a.get('ledger') if a.get('ledger') is not None else a.get('balance')
                     c.execute('INSERT OR REPLACE INTO accounts VALUES (?,?,?,?,?,?,?,?,?)', ('import', str(a['id']), a.get('institution'),
-                              a.get('name'), a.get('last_four'), a.get('type'), a.get('currency') or 'USD', None, None))
+                              a.get('name'), a.get('last_four'), a.get('type'), a.get('currency') or 'USD', _num(bal), a.get('balance_at')))
                 for t in rows.values():
                     c.execute('INSERT OR REPLACE INTO tx VALUES (?,?,?,?,?,?,?,?,?,?)', ('import', str(t['id']), str(t.get('account')), t.get('date'),
                               _num(t.get('amount')), (t.get('description') or '')[:200], t.get('counterparty') or None, t.get('category'), 'posted', now))
                     # History arrives already reviewed: it was reviewed (or not) in the old app, not here.
                     c.execute('INSERT OR IGNORE INTO edits VALUES (?,?,?,?,?,?,?,?)', ('import', str(t['id']), 1, None, None, None, 0, now))
+                try:   # monthly net worth history, if the other app keeps one
+                    snaps = (_get(base, '/api/snapshot', {'kind': 'net_worth'}).get('data') or {}).get('snapshots') or []
+                except Problem:
+                    snaps = []
+                c.execute("DELETE FROM networth WHERE origin='import'")
+                for sn in snaps:
+                    if DATE_RE.match(str(sn.get('date'))) and sn['date'] >= since[:8] + '01' and sn.get('net_worth') is not None:
+                        c.execute("INSERT OR IGNORE INTO networth VALUES (?,?,?,?,'import')", (sn['date'], _num(sn['net_worth']),
+                                  _num(sn.get('assets_balance')), _num(sn.get('liabilities_balance'))))
                 _set(c, 'history', {'from': since, 'from_name': NAMES.get(sid, sid), 'source': sid, 'at': now, 'rows': len(rows)})
         finally:
             c.close()
@@ -586,6 +598,45 @@ def manual_delete(mid):
         finally:
             c.close()
     return {'ok': True}
+
+
+def networth():
+    """Everything owned minus owed: live bank accounts, then imported balances for accounts the live connection
+    doesn't have yet, then manual accounts. Records one point per day for the history chart."""
+    c = db()
+    try:
+        src = active_source(c)
+        names = _origin_names(c, src)
+        rows = []
+        live = [dict(r) for r in c.execute('SELECT institution,name,last_four,type,balance,balance_at FROM accounts WHERE source=?', (src,))]
+        keys = {_key(a['institution'], a['name'], a['last_four']) for a in live}
+        for a in live:
+            if a['balance'] is not None:
+                rows.append({'name': a['name'], 'institution': a['institution'], 'origin': 'bank', 'origin_name': names['bank'], 'balance': a['balance'], 'as_of': a['balance_at']})
+        hist = _setting(c, 'history') or {}
+        for a in c.execute("SELECT institution,name,last_four,balance,balance_at FROM accounts WHERE source='import' AND balance IS NOT NULL"):
+            if _key(a['institution'], a['name'], a['last_four']) in keys:
+                continue
+            if abs(a['balance']) < 0.005:
+                continue
+            rows.append({'name': a['name'], 'institution': a['institution'], 'origin': 'import', 'origin_name': names['import'],
+                         'balance': a['balance'], 'as_of': a['balance_at'] or hist.get('at')})
+        for m in manual_accounts(c):
+            if m['balance'] is not None:
+                rows.append({'name': m['name'], 'institution': 'Manual', 'origin': 'manual', 'origin_name': 'Manual', 'balance': m['balance'], 'as_of': m['updated'],
+                             'detail': f"{m['amount']:g} BTC" if m['kind'] == 'btc' else None})
+        assets = round(sum(r['balance'] for r in rows if r['balance'] > 0), 2)
+        debts = round(sum(r['balance'] for r in rows if r['balance'] < 0), 2)
+        total = round(assets + debts, 2)
+        if rows:
+            with c:
+                c.execute("INSERT OR REPLACE INTO networth VALUES (?,?,?,?,'money')", (dt.date.today().isoformat(), total, assets, debts))
+        points = [dict(r) for r in c.execute('SELECT date,value,origin FROM networth ORDER BY date')]
+    finally:
+        c.close()
+    rows.sort(key=lambda r: -abs(r['balance']))
+    return {'net_worth': total, 'assets': assets, 'liabilities': debts, 'accounts': rows, 'history': points,
+            'note': 'Negative balances are money owed (cards, loans). Imported balances are as of the import and drop out once the live connection has that account.'}
 
 
 def set_source(body):
@@ -675,6 +726,8 @@ TOOLS = [
                      'category': {'type': 'string'}, 'merchant': {'type': 'string'}, 'note': {'type': 'string'}, 'hidden': {'type': 'boolean'}, 'make_rule': {'type': 'boolean'}, 'match': {'type': 'string'}},
                      'required': ['source'], 'additionalProperties': False},
      'annotations': {'readOnlyHint': False, 'destructiveHint': False}},
+    {'name': 'money_net_worth', 'description': 'Net worth now (assets, liabilities, every account with where its balance comes from: bank connection, manual, or imported history) and its history (monthly imported points plus one point per day since).',
+     'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
     {'name': 'money_manual_account', 'description': "Add or update one of the owner's manual accounts (e.g. a cold-storage Bitcoin wallet): name, kind ('btc' = amount in BTC, valued at the live price; 'usd' = dollar balance), amount, optional note, id to update. Only when the owner asks; never ask for seed phrases or keys.",
      'inputSchema': {'type': 'object', 'properties': {'id': {'type': 'string'}, 'name': {'type': 'string'}, 'kind': {'type': 'string', 'enum': ['btc', 'usd']}, 'amount': {'type': 'number'}, 'note': {'type': 'string'}},
                      'required': ['name', 'kind', 'amount'], 'additionalProperties': False},
@@ -697,7 +750,7 @@ def rpc(msg):
             a, n = p.get('arguments') or {}, p.get('name')
             fn = {'money_overview': lambda: overview(), 'money_transactions': lambda: transactions(a),
                   'money_spending': lambda: spending(a.get('month')), 'money_update': lambda: update(a),
-                  'money_manual_account': lambda: manual_save(a)}.get(n)
+                  'money_manual_account': lambda: manual_save(a), 'money_net_worth': lambda: networth()}.get(n)
             if not fn:
                 return {'jsonrpc': '2.0', 'id': i, 'error': {'code': -32602, 'message': 'Unknown tool.'}}
             v = fn()
@@ -781,6 +834,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, overview())
             if path == '/api/transactions':
                 return self.send(200, transactions(q))
+            if path == '/api/networth':
+                return self.send(200, networth())
             if path == '/api/spending':
                 return self.send(200, spending(q.get('month')))
             if path == '/openapi.json':
