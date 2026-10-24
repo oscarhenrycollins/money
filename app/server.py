@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.3.1'
+VERSION = '0.3.2'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -299,6 +299,36 @@ def _origin_names(c, live):
     return {'bank': NAMES.get(live, live), 'import': (meta.get('from_name') or 'Imported') + ' history'}
 
 
+def _excluded(c):
+    """Accounts the owner left out of Money, stored as account keys so imported history for them hides too."""
+    return {tuple(k) for k in (_setting(c, 'excluded') or [])}
+
+
+def _is_out(ex, inst, name, l4):
+    k = _key(inst, name, l4)
+    return bool(k) and k in ex
+
+
+def set_excluded(body):
+    with LOCK:
+        c = db()
+        try:
+            src = active_source(c)
+            a = c.execute('SELECT institution,name,last_four FROM accounts WHERE id=? AND source IN (?, \'import\')', (str(body.get('account') or ''), src)).fetchone()
+            if not a:
+                raise Problem(404, 'No such account.')
+            k = _key(a['institution'], a['name'], a['last_four'])
+            if not k:
+                raise Problem(400, 'This account has no number to tell it apart, so it cannot be hidden.')
+            ex = _excluded(c)
+            ex = ex | {k} if body.get('hidden', True) else ex - {k}
+            with c:
+                _set(c, 'excluded', sorted(list(x) for x in ex))
+        finally:
+            c.close()
+    return overview()
+
+
 def transactions(args, c=None):
     own = c is None
     c = c or db()
@@ -328,9 +358,11 @@ def transactions(args, c=None):
         limit = max(1, min(int(args.get('limit') or 200), 2000))
         q.append('ORDER BY t.date DESC, t.id DESC')
         rules = _rules(c)
-        starts, names = _live_starts(c, src), _origin_names(c, src)
+        starts, names, ex = _live_starts(c, src), _origin_names(c, src), _excluded(c)
         rows = []
         for r in c.execute(' '.join(q), p):
+            if ex and _is_out(ex, r['institution'], r['account_name'], r['last_four']):
+                continue
             if r['source'] == 'import':
                 k = _key(r['institution'], r['account_name'], r['last_four'])
                 if k in starts and (r['date'] or '') >= starts[k]:
@@ -608,14 +640,16 @@ def networth():
         src = active_source(c)
         names = _origin_names(c, src)
         rows = []
-        live = [dict(r) for r in c.execute('SELECT institution,name,last_four,type,balance,balance_at FROM accounts WHERE source=?', (src,))]
+        ex = _excluded(c)
+        live = [dict(r) for r in c.execute('SELECT institution,name,last_four,type,balance,balance_at FROM accounts WHERE source=?', (src,))
+                if not _is_out(ex, r['institution'], r['name'], r['last_four'])]
         keys = {_key(a['institution'], a['name'], a['last_four']) for a in live}
         for a in live:
             if a['balance'] is not None:
                 rows.append({'name': a['name'], 'institution': a['institution'], 'origin': 'bank', 'origin_name': names['bank'], 'balance': a['balance'], 'as_of': a['balance_at']})
         hist = _setting(c, 'history') or {}
         for a in c.execute("SELECT institution,name,last_four,balance,balance_at FROM accounts WHERE source='import' AND balance IS NOT NULL"):
-            if _key(a['institution'], a['name'], a['last_four']) in keys:
+            if _key(a['institution'], a['name'], a['last_four']) in keys or _is_out(ex, a['institution'], a['name'], a['last_four']):
                 continue
             if abs(a['balance']) < 0.005:
                 continue
@@ -691,7 +725,10 @@ def overview():
     c = db()
     try:
         src = active_source(c, srcs)
-        accts = [dict(r) for r in c.execute('SELECT id,institution,name,last_four,type,currency,balance,balance_at FROM accounts WHERE source=? ORDER BY institution,name', (src,))]
+        ex = _excluded(c)
+        allaccts = [dict(r) for r in c.execute('SELECT id,institution,name,last_four,type,currency,balance,balance_at FROM accounts WHERE source=? ORDER BY institution,name', (src,))]
+        accts = [a for a in allaccts if not _is_out(ex, a['institution'], a['name'], a['last_four'])]
+        hidden_accts = [a for a in allaccts if _is_out(ex, a['institution'], a['name'], a['last_four'])]
         visible = transactions({'limit': 1, 'all': True}, c)
         allrows = visible['rows']
         cats = [r[0] for r in c.execute('SELECT name FROM categories ORDER BY pos')]
@@ -699,7 +736,7 @@ def overview():
         if hist:
             hist['showing'] = sum(1 for r in allrows if r['origin'] == 'import')
         out = {'source': src, 'source_name': NAMES.get(src, src), 'sources': srcs, 'chosen': bool(_setting(c, 'source')),
-               'accounts': accts, 'manual': manual_accounts(c), 'history': hist,
+               'accounts': accts, 'hidden_accounts': hidden_accts, 'manual': manual_accounts(c), 'history': hist,
                'to_review': sum(1 for r in allrows if not r['reviewed']), 'transactions': len(allrows),
                'categories': cats, 'rules': _rules(c),
                'last_sync': _setting(c, 'last_sync'), 'error': _setting(c, 'last_error'), 'syncing': SYNCING.is_set()}
@@ -865,6 +902,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, update(b))
             if path == '/api/undo':
                 return self.send(200, undo())
+            if path == '/api/accounts/hide':
+                return self.send(200, set_excluded(b))
             if path == '/api/import/history':
                 return self.send(200, import_history(b))
             if path == '/api/manual':

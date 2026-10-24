@@ -196,7 +196,12 @@ function renderAccounts() {
     const card = h('div', 'mn-bank'); card.append(h('b', 'mn-bank-h', inst));
     const ul = h('ul', 'mn-accts');
     for (const a of list) {
-      const li = h('li'); const n = h('span', 'mn-row-n'); n.append(h('b', '', a.name), h('small', '', a.balance_at ? 'as of ' + day(String(a.balance_at).slice(0, 10)) : ''));
+      const li = h('li', 'mn-tap'); li.tabIndex = 0;
+      li.onclick = async () => {
+        if (!confirm(`Leave ${a.name} out of Money? It disappears from transactions, spending and net worth. You can bring it back at the bottom of this tab.`)) return;
+        try { ov = await api('api/accounts/hide', { account: a.id, hidden: true }); say(`${a.name} hidden.`, 'note'); refresh(); } catch (e) { say(e.message, 'error'); }
+      };
+      const n = h('span', 'mn-row-n'); n.append(h('b', '', a.name), h('small', '', a.balance_at ? 'as of ' + day(String(a.balance_at).slice(0, 10)) : ''));
       li.append(n, h('span', 'mn-amt' + ((a.balance || 0) < 0 ? '' : ' pos'), money(a.balance, a.currency))); ul.append(li);
     }
     card.append(ul); box.append(card);
@@ -219,6 +224,17 @@ function renderAccounts() {
     card.append(ul); mb.append(card);
   } else mb.append(h('p', 'mn-small mn-pad', 'For things no bank connection can see, like a cold-storage Bitcoin wallet.'));
   const hs = el('hist-sec'); hs.replaceChildren();
+  if (ov.hidden_accounts?.length) {
+    hs.append(h('h3', 'mn-sec', 'Left out of Money'));
+    const card = h('div', 'mn-bank'); const ul = h('ul', 'mn-accts');
+    for (const a of ov.hidden_accounts) {
+      const li = h('li'); const n = h('span', 'mn-row-n'); n.append(h('b', '', a.name), h('small', '', a.institution || ''));
+      const btn = h('button', 'mn-btn mn-sm', 'Bring back'); btn.type = 'button';
+      btn.onclick = async () => { try { ov = await api('api/accounts/hide', { account: a.id, hidden: false }); say(`${a.name} is back.`, 'note'); refresh(); } catch (e) { say(e.message, 'error'); } };
+      li.append(n, btn); ul.append(li);
+    }
+    card.append(ul); hs.append(card);
+  }
   if (ov.history) {
     hs.append(h('h3', 'mn-sec', ''));
     hs.firstChild.append(h('span', 'mn-tag import', 'History'), ` Imported from ${ov.history.from_name}`);

@@ -9,6 +9,7 @@
     "/api/spending": {"get": {"summary": "Spending by category for month=YYYY-MM", "responses": {"200": {"description": "{month,spent,income,categories}"}}}},
     "/api/update": {"post": {"summary": "Set reviewed, category, merchant, note, hidden on source+id or ids; optional make_rule+match", "responses": {"200": {"description": "{ok,changed}"}}}},
     "/api/undo": {"post": {"summary": "Undo the last change", "responses": {"200": {"description": "{ok,undone}"}}}},
+    "/api/accounts/hide": {"post": {"summary": "Leave an account out of Money ({account, hidden: true|false})", "responses": {"200": {"description": "overview"}}}},
     "/api/import/history": {"post": {"summary": "One-time copy of another money app's transactions from a start date ({source, from}); hidden per account once the live connection's data begins", "responses": {"200": {"description": "{ok,imported,showing}"}}}},
     "/api/manual": {"post": {"summary": "Add or update a manual account ({id?, name, kind: btc|usd, amount, note?})", "responses": {"200": {"description": "{ok,id}"}}}},
     "/api/manual/{id}/delete": {"post": {"summary": "Delete a manual account", "responses": {"200": {"description": "{ok}"}}}},
