@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.3.2'
+VERSION = '0.3.3'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -359,6 +359,14 @@ def transactions(args, c=None):
         q.append('ORDER BY t.date DESC, t.id DESC')
         rules = _rules(c)
         starts, names, ex = _live_starts(c, src), _origin_names(c, src), _excluded(c)
+        keep = set(_setting(c, 'import_keep') or [])
+        live_amounts = {}
+        if keep:
+            for r2 in c.execute('SELECT t.date,t.amount,a.institution,a.name,a.last_four FROM tx t JOIN accounts a ON a.source=t.source AND a.id=t.account WHERE t.source=?', (src,)):
+                k2 = (_key(r2['institution'], r2['name'], r2['last_four']), round(r2['amount'] or 0, 2))
+                d0 = dt.date.fromisoformat(r2['date'])
+                for off in range(-4, 5):
+                    live_amounts.setdefault((d0 + dt.timedelta(days=off)).isoformat(), set()).add(k2)
         rows = []
         for r in c.execute(' '.join(q), p):
             if ex and _is_out(ex, r['institution'], r['account_name'], r['last_four']):
@@ -366,7 +374,8 @@ def transactions(args, c=None):
             if r['source'] == 'import':
                 k = _key(r['institution'], r['account_name'], r['last_four'])
                 if k in starts and (r['date'] or '') >= starts[k]:
-                    continue   # the live connection covers this account from here on: never show it twice
+                    if r['id'] not in keep or (k, round(r['amount'] or 0, 2)) in live_amounts.get(r['date'], set()):
+                        continue   # the live connection covers this account from here on: never show it twice
             v = _view(r, rules)
             v['origin'] = 'import' if r['source'] == 'import' else 'bank'
             v['origin_name'] = names[v['origin']]
@@ -523,6 +532,12 @@ def import_history(body):
             c.close()
     accts = _get(base, '/api/accounts').get('accounts') or []
     rows = _fetch_all(base, since)
+    review = {str(x) for x in (body.get('review_ids') or []) if re.fullmatch(r'[A-Za-z0-9_-]{1,64}', str(x))}
+    missing = review - set(rows)
+    if missing:   # still waiting for review in the old app but older than the start date: bring just those
+        for t in _fetch_all(base, (dt.date.fromisoformat(since) - dt.timedelta(days=730)).isoformat()).values():
+            if str(t['id']) in missing:
+                rows[t['id']] = t
     now = _now()
     made = 0
     with LOCK:
@@ -546,7 +561,11 @@ def import_history(body):
                     c.execute('INSERT OR REPLACE INTO tx VALUES (?,?,?,?,?,?,?,?,?,?)', ('import', str(t['id']), str(t.get('account')), t.get('date'),
                               _num(t.get('amount')), (t.get('description') or '')[:200], t.get('counterparty') or None, t.get('category'), 'posted', now))
                     # History arrives already reviewed: it was reviewed (or not) in the old app, not here.
-                    c.execute('INSERT OR IGNORE INTO edits VALUES (?,?,?,?,?,?,?,?)', ('import', str(t['id']), 1, None, None, None, 0, now))
+                    pend = str(t['id']) in review
+                    c.execute('INSERT OR IGNORE INTO edits VALUES (?,?,?,?,?,?,?,?)', ('import', str(t['id']), 0 if pend else 1, None, None, None, 0, now))
+                    if pend:
+                        c.execute("UPDATE edits SET reviewed=0 WHERE source='import' AND id=?", (str(t['id']),))
+                _set(c, 'import_keep', sorted(review))
                 try:   # monthly net worth history, if the other app keeps one
                     snaps = (_get(base, '/api/snapshot', {'kind': 'net_worth'}).get('data') or {}).get('snapshots') or []
                 except Problem:

@@ -27,6 +27,7 @@ async function loadOverview() {
   const anyConnected = ov.sources.some((s) => s.connected);
   el('setup').hidden = ready || anyConnected || ov.syncing;
   el('badge').hidden = !ov.to_review; el('badge').textContent = ov.to_review > 99 ? '99+' : ov.to_review;
+  try { window.WizardApp?.badge?.set(ov.to_review); } catch (e) {}
   renderAccounts();
   clearTimeout(poll);
   if (ov.syncing) poll = setTimeout(() => refresh(), 4000);
