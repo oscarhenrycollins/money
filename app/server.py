@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.1.2'
+VERSION = '0.1.3'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -377,6 +377,43 @@ def rule_delete(rid):
     return {'ok': True}
 
 
+def import_setup(body):
+    """Bring categories and rules over from another money app: categories (ordered names) and rules
+    ([{match, category, merchant?}]). Existing rules with the same match text are replaced."""
+    cats = body.get('categories')
+    rules = body.get('rules')
+    if cats is not None and not (isinstance(cats, list) and all(isinstance(x, str) for x in cats) and len(cats) <= 500):
+        raise Problem(400, 'categories must be a list of names.')
+    if rules is not None and not (isinstance(rules, list) and len(rules) <= 2000):
+        raise Problem(400, 'rules must be a list.')
+    added = 0
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                if cats:
+                    names = list(dict.fromkeys(x.strip()[:60] for x in cats if x.strip()))
+                    if body.get('replace_categories'):
+                        c.execute('DELETE FROM categories')
+                    start = c.execute('SELECT COALESCE(MAX(pos),-1)+1 FROM categories').fetchone()[0]
+                    for i, n in enumerate(names):
+                        c.execute('INSERT OR IGNORE INTO categories VALUES (?,?)', (n, start + i))
+                for r in rules or []:
+                    if not isinstance(r, dict):
+                        continue
+                    match, cat = str(r.get('match') or '').strip()[:60], str(r.get('category') or '').strip()[:60]
+                    if len(match) < 3 or not cat:
+                        continue
+                    c.execute('DELETE FROM rules WHERE lower(match)=lower(?)', (match,))
+                    c.execute('INSERT INTO rules(match,category,merchant,created) VALUES (?,?,?,?)',
+                              (match, cat, (str(r['merchant']).strip()[:60] or None) if r.get('merchant') else None, _now()))
+                    c.execute('INSERT OR IGNORE INTO categories VALUES (?, (SELECT COALESCE(MAX(pos),0)+1 FROM categories))', (cat,))
+                    added += 1
+        finally:
+            c.close()
+    return {'ok': True, 'rules_added': added}
+
+
 def set_source(body):
     sid = body.get('source')
     if sid not in dict(SOURCES):
@@ -589,6 +626,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, update(b))
             if path == '/api/undo':
                 return self.send(200, undo())
+            if path == '/api/import':
+                return self.send(200, import_setup(b))
             if path == '/api/source':
                 return self.send(200, set_source(b))
             if path == '/api/sync':

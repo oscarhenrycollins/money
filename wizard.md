@@ -4,7 +4,7 @@ id: money
 name: Money
 type: view
 category: app
-version: 0.1.2
+version: 0.1.3
 summary: Review transactions, set categories and rules, and see spending, over your bank connection.
 tags: [finance]
 license: GPL-3.0-only
