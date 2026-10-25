@@ -97,7 +97,11 @@
           <b id="t-amount" class="mn-amt"></b>
         </div>
         <label class="mn-lab">Category</label>
-        <div id="t-cats" class="mn-chips"></div>
+        <button type="button" class="mn-catbtn" id="t-catbtn" aria-haspopup="listbox"><span id="t-catname">Uncategorized</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+        <div class="mn-picker" id="t-picker" hidden>
+          <input id="t-catq" class="wz-input" type="search" placeholder="Search or create a category" aria-label="Search categories" autocomplete="off">
+          <ul id="t-cats" class="mn-catlist" role="listbox" aria-label="Categories"></ul>
+        </div>
         <label class="mn-check"><input type="checkbox" id="t-rule"> <span id="t-rule-text">Always use this for this merchant</span></label>
         <label class="mn-lab" for="t-name">Name</label>
         <input id="t-name" class="wz-input" maxlength="60">

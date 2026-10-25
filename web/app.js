@@ -62,6 +62,7 @@ const FKEY = 'money.filter.v1';
 const DEF = { show: 'todo', sort: 'newest', direction: '', when: '', category: '', account: '', origin: '' };
 let f = { ...DEF };
 try { f = { ...DEF, ...JSON.parse(localStorage.getItem(FKEY) || '{}') }; } catch (e) {}
+if (f.sort === 'spend' || f.sort === 'income') f.sort = 'largest';
 const saveF = () => { try { localStorage.setItem(FKEY, JSON.stringify(f)); } catch (e) {} };
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 function range(w) {
@@ -78,7 +79,7 @@ function groups() {
   const accts = (ov?.accounts || []).map((a) => [a.id, a.name]);
   const g = [
     ['show', 'Show', [['todo', 'To review'], ['all', 'Everything']]],
-    ['sort', 'Sort', [['newest', 'Newest first'], ['spend', 'Costs the most'], ['income', 'Biggest money in'], ['oldest', 'Oldest first']]],
+    ['sort', 'Sort', [['newest', 'Newest first'], ['largest', 'Biggest amounts'], ['oldest', 'Oldest first']]],
     ['direction', 'Money', [['', 'In and out'], ['out', 'Money out'], ['in', 'Money in']]],
     ['when', 'When', [['', 'Any time'], ['month', 'This month'], ['last', 'Last month'], ['30', 'Last 30 days'], ['90', 'Last 90 days']]],
     ['category', 'Category', [['', 'Any category'], ...cats.map((c) => [c, c])], true],
@@ -208,16 +209,53 @@ function openSheet(t) {
   el('t-amount').textContent = money(t.amount); el('t-amount').classList.toggle('pos', t.amount > 0);
   el('t-name').value = t.merchant || ''; el('t-note').value = t.note || ''; el('t-rule').checked = false;
   el('t-rule-text').textContent = `Always use this for “${(t.merchant || t.description || '').slice(0, 30)}”`;
-  const chips = el('t-cats'); chips.replaceChildren();
-  for (const c of ov.categories) {
-    const b = h('button', 'mn-chip' + (c === pick ? ' on' : ''), c); b.type = 'button';
-    b.onclick = () => { pick = c; chips.querySelectorAll('.mn-chip').forEach((x) => x.classList.toggle('on', x === b)); };
-    chips.append(b);
-  }
+  el('t-catq').value = ''; closePicker(); showPick();
   el('t-hide').textContent = t.hidden ? 'Unhide' : 'Hide';
   el('sheet').hidden = false;
 }
-const closeSheet = () => { el('sheet').hidden = true; cur = null; };
+const closeSheet = () => { el('sheet').hidden = true; cur = null; closePicker(); };
+
+/* category picker */
+const RKEY = 'money.recentcats.v1';
+const recent = () => { try { return JSON.parse(localStorage.getItem(RKEY) || '[]'); } catch (e) { return []; } };
+function remember_cat(c) { try { localStorage.setItem(RKEY, JSON.stringify([c, ...recent().filter((x) => x !== c)].slice(0, 6))); } catch (e) {} }
+function showPick() { el('t-catname').textContent = pick || 'Uncategorized'; el('t-catname').style.color = pick ? '' : 'var(--ink-3)'; }
+function closePicker() { el('t-picker').hidden = true; el('t-catbtn').setAttribute('aria-expanded', 'false'); }
+function openPicker() {
+  el('t-picker').hidden = false; el('t-catbtn').setAttribute('aria-expanded', 'true');
+  drawCats(); el('t-catq').focus({ preventScroll: true });
+  el('t-picker').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+function choose(c) { pick = c; showPick(); closePicker(); }
+function drawCats() {
+  const ul = el('t-cats'); ul.replaceChildren();
+  const q = el('t-catq').value.trim(), ql = q.toLowerCase();
+  const key = (c) => c.replace(/^[^\p{L}\p{N}]+/u, '');
+  const all = [...(ov?.categories || [])].sort((a, b) => key(a).localeCompare(key(b), undefined, { sensitivity: 'base' }));
+  const item = (c, cls = '') => {
+    const li = h('li'); const b = h('button', cls + (c === pick ? ' on' : ''), c); b.type = 'button'; b.setAttribute('role', 'option');
+    b.onclick = () => choose(c); li.append(b); ul.append(li);
+  };
+  if (q) {
+    const hits = all.filter((c) => c.toLowerCase().includes(ql)).sort((a, b) => a.toLowerCase().indexOf(ql) - b.toLowerCase().indexOf(ql));
+    if (!all.some((c) => c.toLowerCase() === ql)) {
+      const li = h('li'); const b = h('button', 'mn-new', `+ Create and use “${q.slice(0, 60)}”`); b.type = 'button';
+      b.onclick = () => choose(q.slice(0, 60)); li.append(b); ul.append(li);
+    }
+    hits.forEach((c) => item(c));
+    return;
+  }
+  const rec = recent().filter((c) => all.includes(c));
+  if (pick && !rec.includes(pick)) rec.unshift(pick);
+  if (rec.length) { ul.append(h('li', 'mn-cath', 'Recent')); rec.forEach((c) => item(c)); ul.append(h('li', 'mn-cath', 'All categories')); }
+  all.forEach((c) => item(c));
+}
+el('t-catbtn').onclick = () => (el('t-picker').hidden ? openPicker() : closePicker());
+el('t-catq').oninput = drawCats;
+el('t-catq').onkeydown = (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); el('t-cats').querySelector('button')?.click(); }
+  if (e.key === 'Escape') { e.stopPropagation(); closePicker(); }
+};
 el('t-close').onclick = closeSheet;
 el('sheet').onclick = (e) => { if (e.target === el('sheet')) closeSheet(); };
 el('t-save').onclick = async () => {
@@ -226,6 +264,7 @@ el('t-save').onclick = async () => {
   const name = el('t-name').value.trim();
   if (name && name !== t.merchant) body.merchant = name;
   if (pick && pick !== t.category) body.category = pick;
+  if (pick) remember_cat(pick);
   if (el('t-rule').checked && pick) { body.category = pick; body.make_rule = true; body.match = (t.merchant || t.description || '').slice(0, 40); }
   try { await api('api/update', body); closeSheet(); say(body.make_rule ? 'Saved, and future ones will match.' : 'Saved.', 'note', true); refresh(); } catch (e) { say(e.message, 'error'); }
 };
@@ -258,7 +297,7 @@ function paintSpending(s) {
     const bar = h('div', 'mn-bar-bg'); const fill = h('div', 'mn-bar-fill'); fill.style.width = Math.max(0, c.amount / max * 100) + '%'; bar.append(fill);
     li.append(top, bar);
     // Open that category in Review with the filter set, so it can be changed from there.
-    li.onclick = () => { tab = 'review'; f = { ...DEF, show: 'all', sort: 'spend', category: c.category, when: month }; saveF(); el('search').value = ''; showTab(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
+    li.onclick = () => { tab = 'review'; f = { ...DEF, show: 'all', sort: 'largest', category: c.category, when: month }; saveF(); el('search').value = ''; showTab(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
     ul.append(li);
   }
   if (!s.categories.length) ul.append(h('li', 'mn-empty', 'No spending this month yet.'));
@@ -433,6 +472,7 @@ el('search').oninput = () => { clearTimeout(timer); timer = setTimeout(() => loa
 window.__wizardCloseOverlay = () => {
   if (!el('fsheet').hidden) { closeFilters(); return true; }
   if (!el('msheet').hidden) { closeManual(); return true; }
+  if (!el('t-picker').hidden) { closePicker(); return true; }
   if (!el('sheet').hidden) { closeSheet(); return true; }
   return false;
 };
@@ -440,6 +480,6 @@ if (!hosted) {
   history.pushState({ wzGuard: 1 }, '', location.href);
   addEventListener('popstate', () => { window.__wizardCloseOverlay(); history.pushState({ wzGuard: 1 }, '', location.href); });
 }
-addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeFilters(); closeManual(); closeSheet(); } });
+addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (!el('t-picker').hidden) { closePicker(); return; } closeFilters(); closeManual(); closeSheet(); } });
 showTab(); refresh();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });

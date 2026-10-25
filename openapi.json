@@ -1,10 +1,10 @@
 {
   "openapi": "3.0.3",
-  "info": {"title": "Money", "version": "0.4.0"},
+  "info": {"title": "Money", "version": "0.4.1"},
   "paths": {
     "/healthz": {"get": {"summary": "Health", "responses": {"200": {"description": "{ok,app,version}"}}}},
     "/api/overview": {"get": {"summary": "Connection in use, available connections, accounts, review count, categories, rules, last sync", "responses": {"200": {"description": "overview"}}}},
-    "/api/transactions": {"get": {"summary": "Transactions with the owner's layer applied: from, to, account, search, category, reviewed, hidden, min_amount, max_amount, direction (out|in), origin (bank|import), sort (newest|oldest|spend|income), limit", "responses": {"200": {"description": "{count,total,transactions}"}}}},
+    "/api/transactions": {"get": {"summary": "Transactions with the owner's layer applied: from, to, account, search, category, reviewed, hidden, min_amount, max_amount, direction (out|in), origin (bank|import), sort (newest|oldest|largest|spend|income), limit", "responses": {"200": {"description": "{count,total,transactions}"}}}},
     "/api/networth": {"get": {"summary": "Net worth now (assets, liabilities, accounts with origin) and its history", "responses": {"200": {"description": "{net_worth,assets,liabilities,accounts,history}"}}}},
     "/api/spending": {"get": {"summary": "Spending by category for month=YYYY-MM", "responses": {"200": {"description": "{month,spent,income,categories}"}}}},
     "/api/update": {"post": {"summary": "Set reviewed, category, merchant, note, hidden on source+id or ids; optional make_rule+match", "responses": {"200": {"description": "{ok,changed}"}}}},
