@@ -25,13 +25,9 @@
       <section data-panel="review">
         <div class="mn-bar">
           <input id="search" class="wz-input" type="search" placeholder="Search" aria-label="Search transactions">
-          <select id="filter" class="wz-input" aria-label="Show">
-            <option value="todo">To review</option>
-            <option value="all">All</option>
-            <option value="bank" id="opt-bank">From your bank</option>
-            <option value="import" id="opt-import" hidden>Imported history</option>
-          </select>
+          <button type="button" class="mn-btn mn-fbtn" id="fbtn" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16 M7 12h10 M10 18h4"/></svg><span>Filter</span><i id="fcount" class="mn-fcount" hidden></i></button>
         </div>
+        <div id="fchips" class="mn-chips mn-active"></div>
         <div id="list"></div>
         <button type="button" class="mn-btn mn-wide" id="all-done" hidden>Mark these reviewed</button>
         <p id="empty" class="mn-empty" hidden></p>
@@ -111,6 +107,17 @@
           <button type="button" class="mn-btn mn-go" id="t-save">Save and mark reviewed</button>
           <button type="button" class="mn-btn" id="t-hide">Hide</button>
           <button type="button" class="mn-btn" id="t-close">Close</button>
+        </div>
+      </div>
+    </div>
+    <!-- Filter and sort -->
+    <div class="mn-sheet" id="fsheet" hidden>
+      <div class="mn-sheet-card" role="dialog" aria-modal="true" aria-labelledby="f-title">
+        <b id="f-title" class="mn-sheet-title">Filter and sort</b>
+        <div id="fgroups"></div>
+        <div class="mn-sheet-btns">
+          <button type="button" class="mn-btn mn-go" id="f-done">Show <span id="f-n"></span></button>
+          <button type="button" class="mn-btn" id="f-reset">Reset</button>
         </div>
       </div>
     </div>

@@ -14,7 +14,7 @@ metadata:
 
 The owner's money app at /money/. It reads one bank-connection app (SimpleFIN by default; Monarch or Teller if chosen under Accounts → Bank connection) and layers his own reviewed state, categories, merchant names, notes, hidden flags and rules on top.
 
-Read: `money_overview` (current connection, accounts, how many need review, categories, rules), `money_transactions` (his categories and names applied; filters from/to, account, search, category, reviewed, amounts), `money_spending` (one month by category; refunds net, transfers and card payments excluded).
+Read: `money_overview` (current connection, accounts, how many need review, categories, rules), `money_transactions` (his categories and names applied; filters from/to, account, search, category, reviewed, amounts, direction out/in; sort newest, oldest, spend = costs the most first, income), `money_spending` (one month by category; refunds net, transfers and card payments excluded).
 
 Change only when he asks: `money_update` with `source` and `id` (or `ids`). Setting `make_rule` with `match` text also categorizes future matching transactions. The app has an Undo for the last change; edits never alter the bank's data.
 

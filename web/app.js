@@ -1,7 +1,7 @@
 'use strict';
 const el = (id) => document.getElementById(id);
 const hosted = document.documentElement.classList.contains('wz-hosted');
-let ov = null, rows = [], tab = 'review', month = new Date().toISOString().slice(0, 7), cur = null, pick = null, poll = null, timer = null;
+let ov = null, rows = [], tab = 'review', cache = {}, month = new Date().toISOString().slice(0, 7), cur = null, pick = null, poll = null, timer = null;
 
 function say(text, kind = '', undo = false) {
   const s = el('status'); s.classList.toggle('wz-sr', !kind); s.classList.toggle('note', kind === 'note'); s.replaceChildren(text);
@@ -15,6 +15,26 @@ async function api(path, body) {
   if (!r.ok) throw new Error(out.error || 'Something went wrong. Try again.');
   return out;
 }
+/* Show the last answer instantly, then refresh it quietly (stale-while-revalidate). */
+const CK = 'money.cache.v1';
+try { cache = JSON.parse(localStorage.getItem(CK) || '{}'); } catch (e) { cache = {}; }
+let saveT = null;
+function remember(path, data) {
+  cache[path] = data;
+  clearTimeout(saveT);
+  saveT = setTimeout(() => {
+    const keep = {}; for (const k of Object.keys(cache).slice(-12)) keep[k] = cache[k];
+    cache = keep;
+    try { localStorage.setItem(CK, JSON.stringify(keep)); } catch (e) {}
+  }, 300);
+  return data;
+}
+async function get(path, paint) {
+  if (cache[path]) paint(cache[path], true);
+  const fresh = remember(path, await api(path));
+  paint(fresh, false);
+  return fresh;
+}
 function h(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 const money = (n, cur) => n == null ? '' : new Intl.NumberFormat(undefined, { style: 'currency', currency: cur || 'USD' }).format(n);
 const day = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
@@ -22,7 +42,10 @@ const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { month: 'sh
 
 /* ---------- overview ---------- */
 async function loadOverview() {
-  ov = await api('api/overview');
+  await get('api/overview', paintOverview);
+}
+function paintOverview(data) {
+  ov = data;
   const ready = ov.transactions > 0 || ov.accounts.length > 0;
   const anyConnected = ov.sources.some((s) => s.connected);
   el('setup').hidden = ready || anyConnected || ov.syncing;
@@ -31,40 +54,152 @@ async function loadOverview() {
   renderAccounts();
   clearTimeout(poll);
   if (ov.syncing) poll = setTimeout(() => refresh(), 4000);
+  if (tab === 'review') renderFilterChips();
 }
 
-/* ---------- review ---------- */
+/* ---------- review: filter and sort ---------- */
+const FKEY = 'money.filter.v1';
+const DEF = { show: 'todo', sort: 'newest', direction: '', when: '', category: '', account: '', origin: '' };
+let f = { ...DEF };
+try { f = { ...DEF, ...JSON.parse(localStorage.getItem(FKEY) || '{}') }; } catch (e) {}
+const saveF = () => { try { localStorage.setItem(FKEY, JSON.stringify(f)); } catch (e) {} };
+const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function range(w) {
+  const t = new Date();
+  if (w === 'month') return [iso(new Date(t.getFullYear(), t.getMonth(), 1)), iso(t)];
+  if (w === 'last') return [iso(new Date(t.getFullYear(), t.getMonth() - 1, 1)), iso(new Date(t.getFullYear(), t.getMonth(), 0))];
+  if (w === '30' || w === '90') return [iso(new Date(t - (+w) * 864e5)), iso(t)];
+  if (/^\d{4}-\d{2}$/.test(w)) { const [y, m] = w.split('-').map(Number); return [w + '-01', iso(new Date(y, m, 0))]; }
+  return [null, null];
+}
+const monthName = (w) => new Date(w + '-15').toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+function groups() {
+  const cats = ['Uncategorized', ...(ov?.categories || [])];
+  const accts = (ov?.accounts || []).map((a) => [a.id, a.name]);
+  const g = [
+    ['show', 'Show', [['todo', 'To review'], ['all', 'Everything']]],
+    ['sort', 'Sort', [['newest', 'Newest first'], ['spend', 'Costs the most'], ['income', 'Biggest money in'], ['oldest', 'Oldest first']]],
+    ['direction', 'Money', [['', 'In and out'], ['out', 'Money out'], ['in', 'Money in']]],
+    ['when', 'When', [['', 'Any time'], ['month', 'This month'], ['last', 'Last month'], ['30', 'Last 30 days'], ['90', 'Last 90 days']]],
+    ['category', 'Category', [['', 'Any category'], ...cats.map((c) => [c, c])], true],
+    ['account', 'Account', [['', 'Any account'], ...accts], true],
+  ];
+  if (ov?.history) g.push(['origin', 'Source', [['', 'Both'], ['bank', 'From ' + ov.source_name], ['import', ov.history.from_name + ' history']]]);
+  return g;
+}
+function label(key, val) {
+  if (key === 'when' && /^\d{4}-\d{2}$/.test(val)) return monthName(val);
+  const g = groups().find((x) => x[0] === key);
+  const o = g && g[2].find((x) => x[0] === val);
+  return o ? o[1] : val;
+}
+function renderFilterChips() {
+  const box = el('fchips'); box.replaceChildren();
+  let n = 0;
+  for (const k of ['show', 'sort', 'direction', 'when', 'category', 'account', 'origin']) {
+    if (f[k] === DEF[k] || (k === 'show')) continue;
+    n++;
+    const b = h('button', 'mn-chip on', label(k, f[k])); b.type = 'button';
+    b.setAttribute('aria-label', 'Remove ' + label(k, f[k]));
+    b.onclick = () => { f[k] = DEF[k]; saveF(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
+    box.append(b);
+  }
+  if (f.show === 'all') n++;
+  el('fcount').hidden = !n; el('fcount').textContent = n;
+  el('fbtn').querySelector('span').textContent = f.show === 'all' ? 'Everything' : 'To review';
+}
+function query() {
+  const q = new URLSearchParams({ limit: 500 });
+  if (f.show === 'todo') q.set('reviewed', 'false');
+  if (f.sort !== 'newest') q.set('sort', f.sort);
+  for (const k of ['direction', 'category', 'account', 'origin']) if (f[k]) q.set(k, f[k]);
+  const [from, to] = range(f.when);
+  if (from) { q.set('from', from); q.set('to', to); }
+  const s = el('search').value.trim(); if (s) q.set('search', s);
+  return 'api/transactions?' + q;
+}
+let listSeq = 0;
 async function loadList() {
-  const q = new URLSearchParams({ limit: 300 });
-  const f = el('filter').value;
-  if (f === 'todo') q.set('reviewed', 'false');
-  if (f === 'bank' || f === 'import') q.set('origin', f);
-  if (el('search').value.trim()) q.set('search', el('search').value.trim());
-  const r = await api('api/transactions?' + q);
+  const seq = ++listSeq;
+  await get(query(), (r, stale) => { if (seq === listSeq) paintList(r, stale); });
+}
+function row(t, showDate) {
+  const li = h('li', 'mn-row' + (t.reviewed ? ' is-reviewed' : ''));
+  const btn = h('button', 'mn-row-b'); btn.type = 'button'; btn.onclick = () => openSheet(t);
+  if (showDate) btn.append(h('span', 'mn-row-d', day(t.date)));
+  const left = h('span', 'mn-row-n');
+  const sub = h('small', '');
+  if (t.origin === 'import') sub.append(h('span', 'mn-tag import', 'History'), ' ');
+  sub.append([t.category || 'Uncategorized', t.account_name].filter(Boolean).join(' · ') + (t.status === 'pending' ? ' · pending' : ''));
+  left.append(h('b', '', t.merchant || t.description), sub);
+  btn.append(left, h('span', 'mn-amt' + (t.amount > 0 ? ' pos' : ''), money(t.amount)));
+  const tick = h('button', 'mn-tick' + (t.reviewed ? ' on' : ''), '✓'); tick.type = 'button';
+  tick.setAttribute('aria-label', t.reviewed ? 'Mark not reviewed' : 'Mark reviewed');
+  tick.onclick = async () => {
+    t.reviewed = !t.reviewed; li.classList.toggle('is-reviewed', t.reviewed); tick.classList.toggle('on', t.reviewed);
+    try { await api('api/update', { source: t.source, id: t.id, reviewed: t.reviewed }); say(t.reviewed ? 'Reviewed.' : 'Marked to review.', 'note', true); refresh(); } catch (e) { say(e.message, 'error'); }
+  };
+  li.append(btn, tick);
+  return li;
+}
+function paintList(r, stale) {
   rows = r.transactions;
   const box = el('list'); box.replaceChildren();
-  let lastDay = null, group = null;
-  for (const t of rows) {
-    if (t.date !== lastDay) { lastDay = t.date; box.append(h('div', 'mn-day', day(t.date))); group = h('ul', 'mn-rows'); box.append(group); }
-    const li = h('li', 'mn-row' + (t.reviewed ? ' is-reviewed' : ''));
-    const btn = h('button', 'mn-row-b'); btn.type = 'button'; btn.onclick = () => openSheet(t);
-    const left = h('span', 'mn-row-n');
-    const sub = h('small', '');
-    if (t.origin === 'import') sub.append(h('span', 'mn-tag import', 'History'), ' ');
-    sub.append([t.category || 'Uncategorized', t.account_name].filter(Boolean).join(' · ') + (t.status === 'pending' ? ' · pending' : ''));
-    left.append(h('b', '', t.merchant || t.description), sub);
-    btn.append(left, h('span', 'mn-amt' + (t.amount > 0 ? ' pos' : ''), money(t.amount)));
-    const tick = h('button', 'mn-tick' + (t.reviewed ? ' on' : ''), '✓'); tick.type = 'button';
-    tick.setAttribute('aria-label', t.reviewed ? 'Mark not reviewed' : 'Mark reviewed');
-    tick.onclick = async () => { try { await api('api/update', { source: t.source, id: t.id, reviewed: !t.reviewed }); say(t.reviewed ? 'Marked to review.' : 'Reviewed.', 'note', true); refresh(); } catch (e) { say(e.message, 'error'); } };
-    li.append(btn, tick); group.append(li);
+  const byDay = f.sort === 'newest' || f.sort === 'oldest';
+  if (byDay) {
+    let lastDay = null, group = null;
+    for (const t of rows) {
+      if (t.date !== lastDay) { lastDay = t.date; box.append(h('div', 'mn-day', day(t.date))); group = h('ul', 'mn-rows'); box.append(group); }
+      group.append(row(t, false));
+    }
+  } else if (rows.length) {
+    box.append(h('div', 'mn-day', `${label('sort', f.sort)} · ${r.total} item${r.total === 1 ? '' : 's'}`));
+    const ul = h('ul', 'mn-rows'); for (const t of rows) ul.append(row(t, true)); box.append(ul);
   }
-  const todo = el('filter').value === 'todo';
+  const todo = f.show === 'todo';
   el('all-done').hidden = !(todo && rows.length > 1);
   el('all-done').textContent = `Mark these ${rows.length} reviewed`;
-  el('empty').hidden = rows.length > 0;
-  el('empty').textContent = ov && ov.syncing ? 'Pulling your transactions…' : todo ? 'All caught up. Nothing left to review.' : 'No transactions match.';
+  el('empty').hidden = rows.length > 0 || stale;
+  const filtered = ['sort', 'direction', 'when', 'category', 'account', 'origin'].some((k) => f[k] !== DEF[k]) || el('search').value.trim();
+  el('empty').textContent = ov && ov.syncing ? 'Pulling your transactions…' : todo && !filtered ? 'All caught up. Nothing left to review.' : 'No transactions match.';
 }
+
+/* filter sheet: changes apply live, so you see the list change behind it */
+let fTimer = null;
+function openFilters() {
+  const box = el('fgroups'); box.replaceChildren();
+  for (const [key, title, opts, asSelect] of groups()) {
+    const g = h('div', 'mn-fgroup'); g.append(h('label', 'mn-lab', title));
+    if (asSelect) {
+      const sel = h('select', 'wz-input'); sel.setAttribute('aria-label', title);
+      for (const [v, t] of opts) { const o = h('option', '', t); o.value = v; sel.append(o); }
+      sel.value = f[key]; if (sel.value !== f[key]) sel.value = '';
+      sel.onchange = () => setF(key, sel.value);
+      g.append(sel);
+    } else {
+      const chips = h('div', 'mn-chips');
+      const list = key === 'when' && /^\d{4}-\d{2}$/.test(f.when) ? [...opts, [f.when, monthName(f.when)]] : opts;
+      for (const [v, t] of list) {
+        const b = h('button', 'mn-chip' + (f[key] === v ? ' on' : ''), t); b.type = 'button';
+        b.onclick = () => { chips.querySelectorAll('.mn-chip').forEach((x) => x.classList.toggle('on', x === b)); setF(key, v); };
+        chips.append(b);
+      }
+      g.append(chips);
+    }
+    box.append(g);
+  }
+  el('f-n').textContent = '';
+  el('fsheet').hidden = false;
+  countF();
+}
+function setF(key, v) { f[key] = v; saveF(); renderFilterChips(); clearTimeout(fTimer); fTimer = setTimeout(() => { loadList().then(countF).catch((e) => say(e.message, 'error')); }, 120); }
+function countF() { const r = cache[query()]; el('f-n').textContent = r ? `${r.total} transaction${r.total === 1 ? '' : 's'}` : ''; }
+const closeFilters = () => { el('fsheet').hidden = true; };
+el('fbtn').onclick = openFilters;
+el('f-done').onclick = closeFilters;
+el('f-reset').onclick = () => { f = { ...DEF }; saveF(); renderFilterChips(); openFilters(); loadList().then(countF).catch((e) => say(e.message, 'error')); };
+el('fsheet').onclick = (e) => { if (e.target === el('fsheet')) closeFilters(); };
+renderFilterChips();
 
 function openSheet(t) {
   cur = t; pick = t.category;
@@ -100,14 +235,18 @@ el('t-hide').onclick = async () => {
 };
 el('all-done').onclick = async () => {
   if (!rows.length) return;
-  const src = rows[0].source;
-  try { await api('api/update', { source: src, ids: rows.map((t) => t.id), reviewed: true }); say(`${rows.length} marked reviewed.`, 'note', true); refresh(); } catch (e) { say(e.message, 'error'); }
+  const by = {}; for (const t of rows) (by[t.source] ||= []).push(t.id);
+  try {
+    for (const [src, ids] of Object.entries(by)) await api('api/update', { source: src, ids, reviewed: true });
+    say(`${rows.length} marked reviewed.`, 'note', true); refresh();
+  } catch (e) { say(e.message, 'error'); }
 };
 async function doUndo() { try { await api('api/undo', {}); say('Undone.', 'note'); refresh(); } catch (e) { say(e.message, 'error'); } }
 
 /* ---------- spending ---------- */
-async function loadSpending() {
-  const s = await api('api/spending?month=' + month);
+async function loadSpending() { await get('api/spending?month=' + month, paintSpending); }
+function paintSpending(s) {
+  if (s.month !== month) return;
   el('month-label').textContent = new Date(month + '-15').toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
   el('next').disabled = month >= new Date().toISOString().slice(0, 7);
   el('spent').textContent = money(s.spent);
@@ -118,38 +257,19 @@ async function loadSpending() {
     const top = h('div', 'mn-cat-t'); top.append(h('span', '', c.category), h('b', c.amount < 0 ? 'pos' : '', money(c.amount)));
     const bar = h('div', 'mn-bar-bg'); const fill = h('div', 'mn-bar-fill'); fill.style.width = Math.max(0, c.amount / max * 100) + '%'; bar.append(fill);
     li.append(top, bar);
-    li.onclick = () => { tab = 'review'; el('filter').value = 'all'; el('search').value = ''; showTab(); listCategory(c.category); };
+    // Open that category in Review with the filter set, so it can be changed from there.
+    li.onclick = () => { tab = 'review'; f = { ...DEF, show: 'all', sort: 'spend', category: c.category, when: month }; saveF(); el('search').value = ''; showTab(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
     ul.append(li);
   }
   if (!s.categories.length) ul.append(h('li', 'mn-empty', 'No spending this month yet.'));
 }
-async function listCategory(cat) {
-  const [y, m] = month.split('-').map(Number);
-  const last = new Date(y, m, 0).getDate();
-  const r = await api(`api/transactions?category=${encodeURIComponent(cat)}&from=${month}-01&to=${month}-${last}&limit=500`);
-  rows = r.transactions; renderRows(cat);
-}
-function renderRows(title) {
-  // Reuse the list renderer for a category drill-down.
-  const saved = rows; el('list').replaceChildren(h('div', 'mn-day', title));
-  const ul = h('ul', 'mn-rows'); el('list').append(ul);
-  for (const t of saved) {
-    const li = h('li', 'mn-row' + (t.reviewed ? ' is-reviewed' : ''));
-    const btn = h('button', 'mn-row-b'); btn.type = 'button'; btn.onclick = () => openSheet(t);
-    const left = h('span', 'mn-row-n'); left.append(h('b', '', t.merchant || t.description), h('small', '', day(t.date) + ' · ' + (t.account_name || '')));
-    btn.append(left, h('span', 'mn-amt' + (t.amount > 0 ? ' pos' : ''), money(t.amount)));
-    li.append(btn); ul.append(li);
-  }
-  el('all-done').hidden = true; el('empty').hidden = saved.length > 0;
-}
-el('prev').onclick = () => { const d = new Date(month + '-15'); d.setMonth(d.getMonth() - 1); month = d.toISOString().slice(0, 7); loadSpending(); };
-el('next').onclick = () => { const d = new Date(month + '-15'); d.setMonth(d.getMonth() + 1); month = d.toISOString().slice(0, 7); loadSpending(); };
 
 /* ---------- net worth ---------- */
 let nwRange = 'ytd', nwData = null;
 const TAG = { bank: 'bank', manual: 'manual', import: 'import' };
-async function loadNetWorth() {
-  nwData = await api('api/networth');
+async function loadNetWorth() { await get('api/networth', paintNetWorth); }
+function paintNetWorth(data) {
+  nwData = data;
   el('nw-total').textContent = money(nwData.net_worth);
   el('nw-total').classList.toggle('neg', nwData.net_worth < 0);
   el('nw-assets').textContent = money(nwData.assets);
@@ -209,9 +329,6 @@ function renderAccounts() {
   }
   if (!ov.accounts.length) box.append(h('p', 'mn-empty', ov.syncing ? 'Pulling your accounts…' : 'No accounts yet.'));
   el('sec-bank').textContent = ov.source_name;
-  el('opt-bank').textContent = 'From ' + ov.source_name;
-  el('opt-import').hidden = !ov.history;
-  if (ov.history) el('opt-import').textContent = ov.history.from_name + ' history';
   const mb = el('manual'); mb.replaceChildren();
   if (ov.manual.length) {
     const card = h('div', 'mn-bank'); const ul = h('ul', 'mn-accts');
@@ -298,18 +415,23 @@ function showTab() {
   document.querySelectorAll('[data-panel]').forEach((p) => p.hidden = p.dataset.panel !== tab);
 }
 document.querySelectorAll('[data-tab]').forEach((b) => b.onclick = () => { tab = b.dataset.tab; showTab(); refresh(); });
+el('prev').onclick = () => { const d = new Date(month + '-15'); d.setMonth(d.getMonth() - 1); month = d.toISOString().slice(0, 7); loadSpending().catch((e) => say(e.message, 'error')); };
+el('next').onclick = () => { const d = new Date(month + '-15'); d.setMonth(d.getMonth() + 1); month = d.toISOString().slice(0, 7); loadSpending().catch((e) => say(e.message, 'error')); };
+const LOAD = { review: () => loadList(), spending: () => loadSpending(), networth: () => loadNetWorth(), accounts: () => null };
+let warmed = false;
 async function refresh() {
   try {
-    await loadOverview();
-    if (tab === 'review') await loadList();
-    if (tab === 'spending') await loadSpending();
-    if (tab === 'networth') await loadNetWorth();
+    await Promise.all([loadOverview(), LOAD[tab]()]);
+    if (!warmed) {   // fetch the other tabs in the background so they open instantly
+      warmed = true;
+      for (const k of Object.keys(LOAD)) if (k !== tab) LOAD[k]()?.catch?.(() => {});
+    }
   } catch (e) { say(e.message, 'error'); }
 }
-el('filter').onchange = () => loadList().catch((e) => say(e.message, 'error'));
 el('search').oninput = () => { clearTimeout(timer); timer = setTimeout(() => loadList().catch((e) => say(e.message, 'error')), 250); };
 
 window.__wizardCloseOverlay = () => {
+  if (!el('fsheet').hidden) { closeFilters(); return true; }
   if (!el('msheet').hidden) { closeManual(); return true; }
   if (!el('sheet').hidden) { closeSheet(); return true; }
   return false;
@@ -318,6 +440,6 @@ if (!hosted) {
   history.pushState({ wzGuard: 1 }, '', location.href);
   addEventListener('popstate', () => { window.__wizardCloseOverlay(); history.pushState({ wzGuard: 1 }, '', location.href); });
 }
-addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeManual(); closeSheet(); } });
+addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeFilters(); closeManual(); closeSheet(); } });
 showTab(); refresh();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });

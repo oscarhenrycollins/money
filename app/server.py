@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.3.3'
+VERSION = '0.4.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -114,19 +114,53 @@ def _get(base, path, query=None, timeout=30):
         raise Problem(502, 'Could not reach that bank connection app.') from None
 
 
-def sources():
-    """Every known connector, whether it's installed (reachable) and whether it's connected to a bank."""
-    out = []
-    for sid, base in SOURCES:
-        s = {'id': sid, 'name': NAMES.get(sid, sid), 'installed': False, 'connected': False, 'banks': 0, 'last_sync': None}
+_SRC = {'at': 0.0, 'list': None}
+_SRC_LOCK = threading.Lock()
+SRC_TTL = 90
+
+
+def _probe(sid, base):
+    s = {'id': sid, 'name': NAMES.get(sid, sid), 'installed': False, 'connected': False, 'banks': 0, 'last_sync': None}
+    try:
+        st = _get(base, '/api/status', timeout=4)
+        s.update(installed=True, connected=st.get('status') == 'connected' or bool(st.get('banks')),
+                 banks=len(st.get('banks') or []), last_sync=st.get('last_sync'))
+    except Problem:
+        pass
+    return s
+
+
+def sources(fresh=False):
+    """Every known connector, whether it's installed (reachable) and whether it's connected to a bank.
+    Checked in parallel and kept for a minute or two: an app that isn't installed takes seconds to fail its name
+    lookup, and that must never sit in front of every screen tap. A background loop keeps it warm."""
+    if not fresh and _SRC['list'] is not None and time.time() - _SRC['at'] < SRC_TTL:
+        return [dict(x) for x in _SRC['list']]
+    with _SRC_LOCK:
+        if not fresh and _SRC['list'] is not None and time.time() - _SRC['at'] < SRC_TTL:
+            return [dict(x) for x in _SRC['list']]
+        out = [None] * len(SOURCES)
+
+        def one(i, sid, base):
+            out[i] = _probe(sid, base)
+        ts = [threading.Thread(target=one, args=(i, sid, base), daemon=True) for i, (sid, base) in enumerate(SOURCES)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(8)
+        out = [o or {'id': sid, 'name': NAMES.get(sid, sid), 'installed': False, 'connected': False, 'banks': 0, 'last_sync': None}
+               for o, (sid, _) in zip(out, SOURCES)]
+        _SRC.update(at=time.time(), list=out)
+        return [dict(x) for x in out]
+
+
+def _sources_loop():
+    while True:
         try:
-            st = _get(base, '/api/status', timeout=4)
-            s.update(installed=True, connected=st.get('status') == 'connected' or bool(st.get('banks')),
-                     banks=len(st.get('banks') or []), last_sync=st.get('last_sync'))
-        except Problem:
+            sources(fresh=True)
+        except Exception:  # noqa: BLE001 - keep the cache warm after a failed check
             pass
-        out.append(s)
-    return out
+        time.sleep(60)
 
 
 def active_source(c=None, srcs=None):
@@ -355,8 +389,12 @@ def transactions(args, c=None):
         for key, op in (('min_amount', '>='), ('max_amount', '<=')):
             if args.get(key) not in (None, ''):
                 q.append(f'AND t.amount {op} ?'); p.append(float(args[key]))
+        if args.get('direction') == 'out':
+            q.append('AND t.amount < 0')
+        elif args.get('direction') == 'in':
+            q.append('AND t.amount > 0')
         limit = max(1, min(int(args.get('limit') or 200), 2000))
-        q.append('ORDER BY t.date DESC, t.id DESC')
+        q.append('ORDER BY t.date ASC, t.id ASC' if args.get('sort') == 'oldest' else 'ORDER BY t.date DESC, t.id DESC')
         rules = _rules(c)
         starts, names, ex = _live_starts(c, src), _origin_names(c, src), _excluded(c)
         keep = set(_setting(c, 'import_keep') or [])
@@ -386,6 +424,10 @@ def transactions(args, c=None):
         if args.get('category'):
             want = str(args['category']).lower()
             rows = [r for r in rows if (r['category'] or 'Uncategorized').lower() == want]
+        if args.get('sort') == 'spend':      # costs the most first: most negative amount at the top
+            rows.sort(key=lambda r: (r['amount'] if r['amount'] is not None else 0, r['date'] or ''))
+        elif args.get('sort') == 'income':   # biggest money in first
+            rows.sort(key=lambda r: -(r['amount'] if r['amount'] is not None else 0))
         out = {'count': len(rows[:limit]), 'total': len(rows), 'transactions': rows[:limit]}
         if args.get('all') is True:
             out['rows'] = rows
@@ -704,6 +746,7 @@ def set_source(body):
                 _set(c, 'last_sync', None)
         finally:
             c.close()
+    _SRC['at'] = 0.0
     start_sync()
     return overview()
 
@@ -771,9 +814,11 @@ def overview():
 TOOLS = [
     {'name': 'money_overview', 'description': "Money app overview: which bank connection it reads (SimpleFIN by default), its accounts with balances, manual accounts (e.g. Bitcoin cold storage), imported history, how many transactions still need review, categories and auto-category rules, last sync.",
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
-    {'name': 'money_transactions', 'description': "Search transactions with the owner's categories, merchant names, notes and reviewed state applied. Filters: from/to (YYYY-MM-DD), account (id, last digits or name), search, category, reviewed (true/false), min_amount/max_amount, origin (bank = live connection, import = imported history), limit (default 200). Each row says its origin. Negative = money out.",
+    {'name': 'money_transactions', 'description': "Search transactions with the owner's categories, merchant names, notes and reviewed state applied. Filters: from/to (YYYY-MM-DD), account (id, last digits or name), search, category, reviewed (true/false), min_amount/max_amount, direction (out = money out, in = money in), origin (bank = live connection, import = imported history), sort (newest default, oldest, spend = costs the most first, income = biggest money in first), limit (default 200). Each row says its origin. Negative = money out.",
      'inputSchema': {'type': 'object', 'properties': {'from': {'type': 'string'}, 'to': {'type': 'string'}, 'account': {'type': 'string'}, 'search': {'type': 'string'}, 'category': {'type': 'string'},
-                     'reviewed': {'type': 'boolean'}, 'min_amount': {'type': 'number'}, 'max_amount': {'type': 'number'}, 'limit': {'type': 'integer'}}, 'additionalProperties': False},
+                     'reviewed': {'type': 'boolean'}, 'min_amount': {'type': 'number'}, 'max_amount': {'type': 'number'}, 'limit': {'type': 'integer'},
+                     'direction': {'type': 'string', 'enum': ['out', 'in']}, 'origin': {'type': 'string', 'enum': ['bank', 'import']},
+                     'sort': {'type': 'string', 'enum': ['newest', 'oldest', 'spend', 'income']}}, 'additionalProperties': False},
      'annotations': {'readOnlyHint': True}},
     {'name': 'money_spending', 'description': 'Spending by category for a month (YYYY-MM, default this month); refunds and credits net against their category; transfers and card payments excluded.',
      'inputSchema': {'type': 'object', 'properties': {'month': {'type': 'string'}}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
@@ -960,5 +1005,6 @@ if __name__ == '__main__':
         except OSError:
             pass
     db().close()
+    threading.Thread(target=_sources_loop, daemon=True).start()
     threading.Thread(target=_scheduler, daemon=True).start()
     ThreadingHTTPServer((os.environ.get('BIND', '0.0.0.0'), int(PORT)), Handler).serve_forever()
