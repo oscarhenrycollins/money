@@ -131,16 +131,21 @@ function row(t, showDate) {
   const left = h('span', 'mn-row-n');
   const sub = h('small', '');
   if (t.origin === 'import') sub.append(h('span', 'mn-tag import', 'History'), ' ');
-  sub.append([t.category || 'Uncategorized', t.account_name].filter(Boolean).join(' · ') + (t.status === 'pending' ? ' · pending' : ''));
+  sub.append([t.account_name, t.status === 'pending' ? 'pending' : null].filter(Boolean).join(' · '));
   left.append(h('b', '', t.merchant || t.description), sub);
   btn.append(left, h('span', 'mn-amt' + (t.amount > 0 ? ' pos' : ''), money(t.amount)));
+  const cat = h('button', 'mn-rowcat' + (t.category ? '' : ' none')); cat.type = 'button';
+  cat.setAttribute('aria-haspopup', 'listbox'); cat.setAttribute('aria-label', 'Category: ' + (t.category || 'Uncategorized') + '. Change');
+  cat.append(h('span', '', t.category || 'Uncategorized'));
+  cat.insertAdjacentHTML('beforeend', '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>');
+  cat.onclick = (e) => { e.stopPropagation(); openPop(t, cat); };
   const tick = h('button', 'mn-tick' + (t.reviewed ? ' on' : ''), '✓'); tick.type = 'button';
   tick.setAttribute('aria-label', t.reviewed ? 'Mark not reviewed' : 'Mark reviewed');
   tick.onclick = async () => {
     t.reviewed = !t.reviewed; li.classList.toggle('is-reviewed', t.reviewed); tick.classList.toggle('on', t.reviewed);
     try { await api('api/update', { source: t.source, id: t.id, reviewed: t.reviewed }); say(t.reviewed ? 'Reviewed.' : 'Marked to review.', 'note', true); refresh(); } catch (e) { say(e.message, 'error'); }
   };
-  li.append(btn, tick);
+  li.append(btn, cat, tick);
   return li;
 }
 function paintList(r, stale) {
@@ -227,29 +232,70 @@ function openPicker() {
   el('t-picker').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 function choose(c) { pick = c; showPick(); closePicker(); }
-function drawCats() {
-  const ul = el('t-cats'); ul.replaceChildren();
-  const q = el('t-catq').value.trim(), ql = q.toLowerCase();
+function catList(ul, q, current, onChoose) {
+  ul.replaceChildren();
+  q = q.trim(); const ql = q.toLowerCase();
   const key = (c) => c.replace(/^[^\p{L}\p{N}]+/u, '');
   const all = [...(ov?.categories || [])].sort((a, b) => key(a).localeCompare(key(b), undefined, { sensitivity: 'base' }));
   const item = (c, cls = '') => {
-    const li = h('li'); const b = h('button', cls + (c === pick ? ' on' : ''), c); b.type = 'button'; b.setAttribute('role', 'option');
-    b.onclick = () => choose(c); li.append(b); ul.append(li);
+    const li = h('li'); const b = h('button', cls + (c === current ? ' on' : ''), c); b.type = 'button'; b.setAttribute('role', 'option');
+    b.onclick = () => onChoose(c); li.append(b); ul.append(li);
   };
   if (q) {
     const hits = all.filter((c) => c.toLowerCase().includes(ql)).sort((a, b) => a.toLowerCase().indexOf(ql) - b.toLowerCase().indexOf(ql));
     if (!all.some((c) => c.toLowerCase() === ql)) {
       const li = h('li'); const b = h('button', 'mn-new', `+ Create and use “${q.slice(0, 60)}”`); b.type = 'button';
-      b.onclick = () => choose(q.slice(0, 60)); li.append(b); ul.append(li);
+      b.onclick = () => onChoose(q.slice(0, 60)); li.append(b); ul.append(li);
     }
     hits.forEach((c) => item(c));
     return;
   }
   const rec = recent().filter((c) => all.includes(c));
-  if (pick && !rec.includes(pick)) rec.unshift(pick);
+  if (current && !rec.includes(current)) rec.unshift(current);
   if (rec.length) { ul.append(h('li', 'mn-cath', 'Recent')); rec.forEach((c) => item(c)); ul.append(h('li', 'mn-cath', 'All categories')); }
   all.forEach((c) => item(c));
 }
+function drawCats() { catList(el('t-cats'), el('t-catq').value, pick, choose); }
+
+/* the same dropdown, straight from a review row: one tap opens it, choosing saves */
+let popT = null, popBtn = null;
+function openPop(t, anchor) {
+  if (popT === t) { closePop(); return; }
+  closePop();
+  popT = t; popBtn = anchor; anchor.setAttribute('aria-expanded', 'true');
+  const pop = el('catpop'); el('pop-q').value = '';
+  drawPop(); el('popbg').hidden = false; pop.hidden = false; placePop();
+  if (matchMedia('(hover: hover)').matches) el('pop-q').focus({ preventScroll: true });
+}
+function placePop() {
+  if (!popBtn) return;
+  const pop = el('catpop'), r = popBtn.getBoundingClientRect(), W = innerWidth, H = innerHeight;
+  const w = Math.min(320, W - 16); pop.style.width = w + 'px';
+  pop.style.left = Math.max(8, Math.min(r.left, W - w - 8)) + 'px';
+  const below = H - r.bottom - 12, above = r.top - 12;
+  const up = below < 260 && above > below;
+  const room = Math.max(180, Math.min(380, up ? above : below));
+  pop.style.maxHeight = room + 'px';
+  if (up) { pop.style.top = ''; pop.style.bottom = (H - r.top + 6) + 'px'; } else { pop.style.bottom = ''; pop.style.top = (r.bottom + 6) + 'px'; }
+}
+function drawPop() { if (popT) catList(el('pop-list'), el('pop-q').value, popT.category, setRowCat); }
+function closePop() { el('catpop').hidden = true; el('popbg').hidden = true; popBtn?.setAttribute('aria-expanded', 'false'); popT = null; popBtn = null; }
+async function setRowCat(c) {
+  const t = popT, b = popBtn; closePop();
+  if (!t || c === t.category) return;
+  const before = t.category; t.category = c; remember_cat(c);
+  if (b) { b.firstChild.textContent = c; b.classList.remove('none'); }
+  try { await api('api/update', { source: t.source, id: t.id, category: c }); say(`Set to ${c}.`, 'note', true); refresh(); }
+  catch (e) { t.category = before; if (b) b.firstChild.textContent = before || 'Uncategorized'; say(e.message, 'error'); }
+}
+el('pop-q').oninput = drawPop;
+el('pop-q').onkeydown = (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); el('pop-list').querySelector('button')?.click(); }
+  if (e.key === 'Escape') { e.stopPropagation(); closePop(); }
+};
+el('popbg').onclick = closePop;
+addEventListener('resize', closePop);
+el('list').closest('.wz-scroll')?.addEventListener('scroll', () => { if (popT) placePop(); }, { passive: true });
 el('t-catbtn').onclick = () => (el('t-picker').hidden ? openPicker() : closePicker());
 el('t-catq').oninput = drawCats;
 el('t-catq').onkeydown = (e) => {
@@ -470,6 +516,7 @@ async function refresh() {
 el('search').oninput = () => { clearTimeout(timer); timer = setTimeout(() => loadList().catch((e) => say(e.message, 'error')), 250); };
 
 window.__wizardCloseOverlay = () => {
+  if (popT) { closePop(); return true; }
   if (!el('fsheet').hidden) { closeFilters(); return true; }
   if (!el('msheet').hidden) { closeManual(); return true; }
   if (!el('t-picker').hidden) { closePicker(); return true; }
@@ -480,6 +527,6 @@ if (!hosted) {
   history.pushState({ wzGuard: 1 }, '', location.href);
   addEventListener('popstate', () => { window.__wizardCloseOverlay(); history.pushState({ wzGuard: 1 }, '', location.href); });
 }
-addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (!el('t-picker').hidden) { closePicker(); return; } closeFilters(); closeManual(); closeSheet(); } });
+addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (popT) { closePop(); return; } if (!el('t-picker').hidden) { closePicker(); return; } closeFilters(); closeManual(); closeSheet(); } });
 showTab(); refresh();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
