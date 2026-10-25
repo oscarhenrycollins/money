@@ -165,3 +165,14 @@ html.wz-hosted .mn-tabs button { min-height: 44px; gap: 1px; }
 .mn-pop .mn-catlist { flex: 1; min-height: 0; max-height: none; }
 .mn-popbg { position: fixed; inset: 0; z-index: 39; background: rgba(0, 0, 0, .5); }
 .mn-pop .mn-catlist { mask-image: linear-gradient(to bottom, #000 calc(100% - 12px), transparent); }
+
+/* Use the whole window: no centred 640px column */
+.wz-app.mn-app { max-width: none; margin: 0; }
+.mn-scroll { padding-left: 14px; padding-right: 14px; }
+/* Wide windows: one line per transaction, category in its own aligned column */
+@media (min-width: 760px) {
+  .mn-row { grid-template-columns: minmax(0, 1fr) 220px auto; grid-template-rows: auto; }
+  .mn-row > .mn-row-b { grid-column: 1; grid-row: 1; padding-bottom: 8px; }
+  .mn-rowcat { grid-column: 2; grid-row: 1; justify-self: stretch; justify-content: space-between; max-width: none; margin: 0 10px 0 6px; }
+  .mn-row > .mn-tick { grid-column: 3; grid-row: 1; }
+}
