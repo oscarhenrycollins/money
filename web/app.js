@@ -111,9 +111,15 @@ function renderFilterChips() {
     b.onclick = () => { f[k] = DEF[k]; saveF(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
     box.append(b);
   }
-  if (f.show === 'all') n++;
-  el('fcount').hidden = !n; el('fcount').textContent = n;
-  el('fbtn').querySelector('span').textContent = f.show === 'all' ? 'Everything' : 'To review';
+  if (f.show === 'all') {
+    const b = h('button', 'mn-chip on', 'Everything'); b.type = 'button'; b.setAttribute('aria-label', 'Back to only to review');
+    b.onclick = () => setF('show', 'todo'); box.prepend(b); n++;
+  }
+  if (n > 1) {
+    const c = h('button', 'mn-chip mn-clear', 'Clear all'); c.type = 'button';
+    c.onclick = () => { f = { ...DEF }; el('search').value = ''; saveF(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
+    box.append(c);
+  }
 }
 function query() {
   const q = new URLSearchParams({ limit: 500 });
@@ -154,7 +160,8 @@ function card(t) {
   chip.append(h('i'), h('b', '', l4 ? l4.slice(-4) : '••'));
   return chip;
 }
-const shortAcct = (n) => String(n || '').replace(/\s*\(\.{0,3}\d{4,5}\)\s*$/, '').replace(/®/g, '').trim();
+const tidyCase = (x) => /[a-z]/.test(x) ? x : x.replace(/\b([A-Z])([A-Z]+)\b/g, (m, a, b) => (['USAA', 'CKG', 'ATM', 'IRA', 'HSA'].includes(m) ? m : a + b.toLowerCase())).replace(/\bCkg\b|\bCKG\b/g, 'Checking');
+const shortAcct = (n) => tidyCase(String(n || '').replace(/\s*\((?:\.{0,3}|X+)\d{4,5}\)\s*$/i, '').replace(/\s*(?:X{2,}|\*{2})\d{4}\b/gi, '').replace(/®|TM\b|™/g, '').replace(/\s{2,}/g, ' ').trim());
 /* Category icons: small drawn SVGs (always render; no emoji font needed) and a colour per category */
 const IC = {
   warn: 'M12 3l10 18H2z M12 10v5 M12 18h.01', medal: 'M8 3l4 6 4-6 M12 21a6 6 0 1 0 0-12 6 6 0 0 0 0 12z', brief: 'M3 8h18v12H3z M8 8V5h8v3 M3 13h18',
@@ -351,41 +358,7 @@ function openMenu(k, btn) {
 }
 el('menubg').onclick = closeMenu;
 
-/* filter sheet: changes apply live, so you see the list change behind it */
-let fTimer = null;
-function openFilters() {
-  const box = el('fgroups'); box.replaceChildren();
-  for (const [key, title, opts, asSelect] of groups()) {
-    const g = h('div', 'mn-fgroup'); g.append(h('label', 'mn-lab', title));
-    if (asSelect) {
-      const sel = h('select', 'wz-input'); sel.setAttribute('aria-label', title);
-      for (const [v, t] of opts) { const o = h('option', '', t); o.value = v; sel.append(o); }
-      sel.value = f[key]; if (sel.value !== f[key]) sel.value = '';
-      sel.onchange = () => setF(key, sel.value);
-      g.append(sel);
-    } else {
-      const chips = h('div', 'mn-chips');
-      const list = key === 'when' && /^\d{4}-\d{2}$/.test(f.when) ? [...opts, [f.when, monthName(f.when)]] : opts;
-      for (const [v, t] of list) {
-        const b = h('button', 'mn-chip' + (f[key] === v ? ' on' : ''), t); b.type = 'button';
-        b.onclick = () => { chips.querySelectorAll('.mn-chip').forEach((x) => x.classList.toggle('on', x === b)); setF(key, v); };
-        chips.append(b);
-      }
-      g.append(chips);
-    }
-    box.append(g);
-  }
-  el('f-n').textContent = '';
-  el('fsheet').hidden = false;
-  countF();
-}
-function setF(key, v) { f[key] = v; saveF(); renderFilterChips(); clearTimeout(fTimer); fTimer = setTimeout(() => { loadList().then(countF).catch((e) => say(e.message, 'error')); }, 120); }
-function countF() { const r = cache[query()]; el('f-n').textContent = r ? `${r.total} transaction${r.total === 1 ? '' : 's'}` : ''; }
-const closeFilters = () => { el('fsheet').hidden = true; };
-el('fbtn').onclick = openFilters;
-el('f-done').onclick = closeFilters;
-el('f-reset').onclick = () => { f = { ...DEF }; saveF(); renderFilterChips(); openFilters(); loadList().then(countF).catch((e) => say(e.message, 'error')); };
-el('fsheet').onclick = (e) => { if (e.target === el('fsheet')) closeFilters(); };
+function setF(key, v) { f[key] = v; saveF(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); }
 renderFilterChips();
 
 function openSheet(t) {
@@ -511,21 +484,71 @@ el('all-done').onclick = async () => {
 async function doUndo() { try { await api('api/undo', {}); say('Undone.', 'note'); refresh(); } catch (e) { say(e.message, 'error'); } }
 
 /* ---------- spending ---------- */
-async function loadSpending() { await get('api/spending?month=' + month, paintSpending); }
+const prevMonth = (m) => { const d = new Date(m + '-15'); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); };
+async function loadSpending() {
+  const m = month;
+  await Promise.all([get('api/spending?month=' + m, (s) => paintSpending(s)), get('api/spending?month=' + prevMonth(m), () => { if (cache['api/spending?month=' + m]) paintSpending(cache['api/spending?month=' + m]); })]);
+}
+const catColor = (c) => { const m = CAT_ICONS.find(([re]) => re.test(c || 'Uncategorized')); return m ? m[2] : PALETTE[hash(c) % PALETTE.length]; };
+function donut(parts, total, center) {
+  const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 120 120'); svg.setAttribute('class', 'mn-donut'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', 'Spending by category');
+  const R = 48, C = 2 * Math.PI * R; let off = 0;
+  const bg = document.createElementNS(NS, 'circle'); bg.setAttribute('cx', 60); bg.setAttribute('cy', 60); bg.setAttribute('r', R); bg.setAttribute('class', 'mn-donut-bg'); svg.append(bg);
+  for (const [v, col] of parts) {
+    const len = Math.max(0, v / total * C); if (len < 0.4) continue;
+    const c = document.createElementNS(NS, 'circle'); c.setAttribute('cx', 60); c.setAttribute('cy', 60); c.setAttribute('r', R);
+    c.setAttribute('stroke', col); c.setAttribute('stroke-dasharray', `${Math.max(0, len - 1.2)} ${C}`); c.setAttribute('stroke-dashoffset', -off);
+    c.setAttribute('class', 'mn-donut-seg'); svg.append(c); off += len;
+  }
+  const wrap = h('div', 'mn-donut-w'); wrap.append(svg);
+  const mid = h('div', 'mn-donut-c'); mid.append(h('small', '', center[0]), h('b', '', center[1])); wrap.append(mid);
+  return wrap;
+}
 function paintSpending(s) {
   if (s.month !== month) return;
+  const now = new Date().toISOString().slice(0, 7);
   el('month-label').textContent = new Date(month + '-15').toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
-  el('next').disabled = month >= new Date().toISOString().slice(0, 7);
-  el('spent').textContent = money(s.spent);
+  el('next').disabled = month >= now;
+  const prev = cache['api/spending?month=' + prevMonth(month)];
+  const [y, m] = month.split('-').map(Number);
+  const days = month === now ? new Date().getDate() : new Date(y, m, 0).getDate();
+  const delta = prev && prev.spent ? (s.spent - prev.spent) / prev.spent * 100 : null;
+  const tiles = el('sp-tiles'); tiles.replaceChildren(
+    tile('Spent', money(s.spent), 'out'),
+    tile('vs ' + new Date(prevMonth(month) + '-15').toLocaleDateString(undefined, { month: 'short' }), delta == null ? '—' : `${delta > 0 ? '▲' : '▼'} ${Math.abs(delta).toFixed(0)}%`, delta == null ? '' : delta > 0 ? 'warn' : 'ok'),
+    tile('Income', money(s.income), 'in'),
+    tile('Per day', money(s.spent / Math.max(1, days)), ''));
+  const cats = s.categories.filter((c) => c.amount > 0), total = cats.reduce((x, c) => x + c.amount, 0) || 1;
+  const top = cats.slice(0, 8), rest = cats.slice(8).reduce((x, c) => x + c.amount, 0);
+  const RANK = ['#8b7cf6', '#ef6f9a', '#3fc1b0', '#f2a93b', '#5aa6f5', '#e8745a', '#9ccc5a', '#c48ae8'];
+  const colOf = {}; top.forEach((c, i) => { colOf[c.category] = RANK[i]; });
+  const parts = top.map((c) => [c.amount, colOf[c.category]]); if (rest > 0) parts.push([rest, '#5b5f6e']);
+  const chart = el('sp-chart'); chart.replaceChildren();
+  if (cats.length) {
+    chart.append(donut(parts, total, ['Spent', money(s.spent)]));
+    const leg = h('ul', 'mn-legend');
+    for (const c of top) { const li = h('li'); const dot = h('i'); dot.style.background = colOf[c.category]; li.append(dot, h('span', '', c.category), h('b', '', Math.round(c.amount / total * 100) + '%')); leg.append(li); }
+    if (rest > 0) { const li = h('li'); const dot = h('i'); dot.style.background = '#5b5f6e'; li.append(dot, h('span', '', `${cats.length - 8} more`), h('b', '', Math.round(rest / total * 100) + '%')); leg.append(li); }
+    chart.append(leg);
+  }
+  const prevBy = Object.fromEntries((prev?.categories || []).map((c) => [c.category, c.amount]));
   const ul = el('cats'); ul.replaceChildren();
-  const max = Math.max(1, ...s.categories.map((c) => c.amount));
   for (const c of s.categories) {
-    const li = h('li', 'mn-cat');
-    const top = h('div', 'mn-cat-t'); top.append(h('span', '', c.category), h('b', c.amount < 0 ? 'pos' : '', money(c.amount)));
-    const bar = h('div', 'mn-bar-bg'); const fill = h('div', 'mn-bar-fill'); fill.style.width = Math.max(0, c.amount / max * 100) + '%'; bar.append(fill);
-    li.append(top, bar);
-    // Open that category in Review with the filter set, so it can be changed from there.
-    li.onclick = () => { tab = 'review'; f = { ...DEF, show: 'all', sort: 'largest', category: c.category, when: month }; saveF(); el('search').value = ''; showTab(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
+    const li = h('li', 'mn-cat'); li.tabIndex = 0; li.setAttribute('role', 'button');
+    const pct = c.amount > 0 ? c.amount / total * 100 : 0, maxAmt = cats[0]?.amount || 1;
+    const body = h('div', 'mn-cat-b');
+    const t = h('div', 'mn-cat-t'); t.append(h('span', 'mn-cat-n', c.category));
+    const was = prevBy[c.category]; const tr = h('span', 'mn-trendc');
+    if (was && c.amount > 0) { const d = (c.amount - was) / was * 100; if (Math.abs(d) >= 10) tr.append(h('i', 'mn-trend ' + (d > 0 ? 'up' : 'down'), `${d > 0 ? '▲' : '▼'} ${d > 999 ? '999+' : Math.abs(d).toFixed(0)}%`)); }
+    else if (!was && c.amount > 0 && prev) tr.append(h('i', 'mn-trend new', 'New'));
+    t.append(tr, h('small', 'mn-pct', c.amount > 0 ? pct.toFixed(pct < 1 ? 1 : 0) + '%' : 'refund'), h('b', 'mn-camt' + (c.amount < 0 ? ' pos' : ''), money(c.amount)));
+    const bar = h('div', 'mn-bar-bg'); const fill = h('div', 'mn-bar-fill'); fill.style.width = Math.max(c.amount > 0 ? 1.5 : 0, c.amount / maxAmt * 100) + '%';  bar.append(fill);
+    body.append(t, bar);
+    const ic = catIcon(c.category); const cc = colOf[c.category] || '#7d8296'; ic.style.setProperty('--ic', cc); fill.style.background = cc;
+    li.append(ic, body, h('span', 'mn-chev', '›'));
+    const go = () => { tab = 'review'; f = { ...DEF, show: 'all', sort: 'largest', category: c.category, when: month }; saveF(); el('search').value = ''; showTab(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
+    li.onclick = go; li.onkeydown = (e) => { if (e.key === 'Enter') go(); };
     ul.append(li);
   }
   if (!s.categories.length) ul.append(h('li', 'mn-empty', 'No spending this month yet.'));
@@ -535,25 +558,36 @@ function paintSpending(s) {
 let nwRange = 'ytd', nwData = null;
 const TAG = { bank: 'bank', manual: 'manual', import: 'import' };
 async function loadNetWorth() { await get('api/networth', paintNetWorth); }
+function acctIcon(a) {
+  if (a.origin === 'manual') { const e = h('span', 'mn-av mn-btc', a.detail && /BTC/.test(a.detail) ? '₿' : '$'); e.style.setProperty('--c', a.detail && /BTC/.test(a.detail) ? '#f39b2a' : '#4caf7a'); return e; }
+  return card({ institution: a.institution, account_name: a.name, last_four: a.last_four });
+}
 function paintNetWorth(data) {
   nwData = data;
   el('nw-total').textContent = money(nwData.net_worth);
   el('nw-total').classList.toggle('neg', nwData.net_worth < 0);
   el('nw-assets').textContent = money(nwData.assets);
   el('nw-debts').textContent = money(nwData.liabilities);
+  const tot = Math.abs(nwData.assets) + Math.abs(nwData.liabilities) || 1;
+  el('nw-split').style.setProperty('--a', (nwData.assets / tot * 100) + '%');
   drawChart();
   const box = el('nw-list'); box.replaceChildren();
-  for (const [title, list] of [['Assets', nwData.accounts.filter((a) => a.balance > 0)], ['Owed', nwData.accounts.filter((a) => a.balance < 0)]]) {
+  for (const [title, list, cls] of [['Assets', nwData.accounts.filter((a) => a.balance > 0), 'in'], ['Owed', nwData.accounts.filter((a) => a.balance < 0), 'out']]) {
     if (!list.length) continue;
-    box.append(h('h3', 'mn-sec', title));
-    const card = h('div', 'mn-bank'); const ul = h('ul', 'mn-accts');
+    const sum = list.reduce((x, a) => x + a.balance, 0), max = Math.max(...list.map((a) => Math.abs(a.balance)));
+    const col = h('div', 'mn-nwcol');
+    const hd = h('div', 'mn-nwh ' + cls); hd.append(h('b', '', title), h('small', '', `${list.length} account${list.length === 1 ? '' : 's'}`), h('span', 'mn-amt' + (cls === 'in' ? ' pos' : ' neg'), money(sum)));
+    const ul = h('ul', 'mn-accts mn-card-list');
     for (const a of list) {
       const li = h('li'); const n = h('span', 'mn-row-n');
       const sub = h('small', ''); sub.append(h('span', 'mn-tag ' + TAG[a.origin], a.origin === 'import' ? 'History' : a.origin_name), ' ', [a.detail, a.institution !== 'Manual' ? a.institution : null, a.origin === 'import' && a.as_of ? 'as of ' + day(String(a.as_of).slice(0, 10)) : null].filter(Boolean).join(' · '));
-      n.append(h('b', '', a.name), sub);
-      li.append(n, h('span', 'mn-amt' + (a.balance > 0 ? ' pos' : ''), money(a.balance))); ul.append(li);
+      n.append(h('b', '', shortAcct(a.name)), sub);
+      const right = h('span', 'mn-nwamt'); const bar = h('i'); bar.style.width = Math.max(3, Math.abs(a.balance) / max * 100) + '%';
+      const bg = h('span', 'mn-abg ' + cls); bg.append(bar);
+      right.append(h('b', 'mn-amt' + (a.balance > 0 ? ' pos' : ' neg'), money(a.balance)), bg);
+      li.append(acctIcon(a), n, right); ul.append(li);
     }
-    card.append(ul); box.append(card);
+    col.append(hd, ul); box.append(col);
   }
 }
 function drawChart() {
@@ -561,17 +595,33 @@ function drawChart() {
   let pts = (nwData?.history || []).map((p) => ({ d: p.date, v: p.value }));
   const today = new Date(); const cut = nwRange === 'ytd' ? `${today.getFullYear()}-01-01` : nwRange === '90' ? new Date(today - 90 * 864e5).toISOString().slice(0, 10) : '0000';
   pts = pts.filter((p) => p.d >= cut);
+  const ch = el('nw-change'); ch.replaceChildren();
   if (pts.length < 2) { box.append(h('p', 'mn-small', 'The chart fills in as days go by.')); return; }
-  const W = 320, H = 110, P = 6, t0 = Date.parse(pts[0].d), t1 = Date.parse(pts[pts.length - 1].d) || t0 + 1;
-  const lo = Math.min(0, ...pts.map((p) => p.v)), hi = Math.max(0, ...pts.map((p) => p.v)) || 1;
+  const diff = pts[pts.length - 1].v - pts[0].v, pc = pts[0].v ? diff / Math.abs(pts[0].v) * 100 : 0;
+  ch.className = 'mn-change ' + (diff >= 0 ? 'up' : 'down');
+  ch.append(`${diff >= 0 ? '▲' : '▼'} ${money(Math.abs(diff))}`, h('small', '', pts[0].v > 0 ? ` ${pc >= 0 ? '+' : '−'}${Math.abs(pc).toFixed(1)}% since ${day(pts[0].d)}` : ` since ${day(pts[0].d)}`));
+  const W = 600, H = 170, P = 4, t0 = Date.parse(pts[0].d), t1 = Date.parse(pts[pts.length - 1].d) || t0 + 1;
+  let lo = Math.min(...pts.map((p) => p.v)), hi = Math.max(...pts.map((p) => p.v)); const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.1 || 1; lo -= pad; hi += pad;
   const x = (d) => P + (Date.parse(d) - t0) / Math.max(1, t1 - t0) * (W - 2 * P);
   const y = (v) => P + (hi - v) / Math.max(1, hi - lo) * (H - 2 * P);
   const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg');
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('preserveAspectRatio', 'none'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', 'Net worth over time');
-  const zero = document.createElementNS(NS, 'line'); zero.setAttribute('x1', 0); zero.setAttribute('x2', W); zero.setAttribute('y1', y(0)); zero.setAttribute('y2', y(0)); zero.setAttribute('class', 'mn-zero');
-  const line = document.createElementNS(NS, 'polyline'); line.setAttribute('points', pts.map((p) => `${x(p.d).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ')); line.setAttribute('class', 'mn-line');
-  svg.append(zero, line); box.append(svg);
-  const lab = h('div', 'mn-chart-x'); lab.append(h('span', '', day(pts[0].d)), h('span', '', day(pts[pts.length - 1].d))); box.append(lab);
+  svg.innerHTML = '<defs><linearGradient id="nwg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".35"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>';
+  const grid = h('div', 'mn-yax');
+  for (const g of [0.08, 0.5, 0.92]) {
+    const v = hi - (hi - lo) * g, gl = document.createElementNS(NS, 'line');
+    gl.setAttribute('x1', 0); gl.setAttribute('x2', W); gl.setAttribute('y1', y(v)); gl.setAttribute('y2', y(v)); gl.setAttribute('class', 'mn-zero'); svg.append(gl);
+    const lab = h('span', '', new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(v)); lab.style.top = (y(v) / H * 100) + '%'; grid.append(lab);
+  }
+  const line = pts.map((p) => `${x(p.d).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+  const area = document.createElementNS(NS, 'polygon'); area.setAttribute('points', `${x(pts[0].d)},${H} ${line} ${x(pts[pts.length - 1].d)},${H}`); area.setAttribute('fill', 'url(#nwg)'); area.setAttribute('class', 'mn-area');
+  const pl = document.createElementNS(NS, 'polyline'); pl.setAttribute('points', line); pl.setAttribute('class', 'mn-line');
+  svg.append(area, pl);
+  const wrap = h('div', 'mn-plot'); wrap.append(svg, grid);
+  const last = pts[pts.length - 1], dot = h('i', 'mn-lastdot'); dot.style.left = (x(last.d) / W * 100) + '%'; dot.style.top = (y(last.v) / H * 100) + '%'; wrap.append(dot);
+  box.append(wrap);
+  const lab = h('div', 'mn-chart-x'); const mid = pts[Math.floor(pts.length / 2)];
+  lab.append(h('span', '', day(pts[0].d)), h('span', '', day(mid.d)), h('span', '', day(last.d))); box.append(lab);
 }
 el('nw-range').querySelectorAll('.mn-chip').forEach((b) => b.onclick = () => { nwRange = b.dataset.range; el('nw-range').querySelectorAll('.mn-chip').forEach((x) => x.classList.toggle('on', x === b)); drawChart(); });
 
@@ -580,19 +630,27 @@ function renderAccounts() {
   const box = el('accts'); box.replaceChildren();
   const by = {};
   for (const a of ov.accounts) (by[a.institution || 'Other'] ||= []).push(a);
-  for (const [inst, list] of Object.entries(by)) {
-    const card = h('div', 'mn-bank'); card.append(h('b', 'mn-bank-h', inst));
+  const groups = Object.entries(by).sort((x, y) => Math.abs(y[1].reduce((s, a) => s + (a.balance || 0), 0)) - Math.abs(x[1].reduce((s, a) => s + (a.balance || 0), 0)));
+  for (const [inst, list] of groups) {
+    const sum = list.reduce((s, a) => s + (a.balance || 0), 0);
+    const asof = list.map((a) => a.balance_at).filter(Boolean).sort().pop();
+    const card_ = h('div', 'mn-bank');
+    const hd = h('div', 'mn-bank-h'); const logo = card({ institution: inst, account_name: inst }); logo.classList.add('mn-logo'); logo.querySelector('b').textContent = '';
+    const ht = h('span', 'mn-row-n'); ht.append(h('b', '', inst), h('small', '', `${list.length} account${list.length === 1 ? '' : 's'}${asof ? ' · as of ' + day(String(asof).slice(0, 10)) : ''}`));
+    hd.append(logo, ht, h('span', 'mn-amt' + (sum > 0.004 ? ' pos' : sum < -0.004 ? ' neg' : ' zero'), money(sum)));
+    card_.append(hd);
     const ul = h('ul', 'mn-accts');
-    for (const a of list) {
-      const li = h('li', 'mn-tap'); li.tabIndex = 0;
+    for (const a of [...list].sort((x, y) => Math.abs(y.balance || 0) - Math.abs(x.balance || 0))) {
+      const li = h('li', 'mn-tap'); li.tabIndex = 0; li.title = 'Tap to leave this account out of Money';
       li.onclick = async () => {
         if (!confirm(`Leave ${a.name} out of Money? It disappears from transactions, spending and net worth. You can bring it back at the bottom of this tab.`)) return;
         try { ov = await api('api/accounts/hide', { account: a.id, hidden: true }); say(`${a.name} hidden.`, 'note'); refresh(); } catch (e) { say(e.message, 'error'); }
       };
-      const n = h('span', 'mn-row-n'); n.append(h('b', '', a.name), h('small', '', a.balance_at ? 'as of ' + day(String(a.balance_at).slice(0, 10)) : ''));
-      li.append(n, h('span', 'mn-amt' + ((a.balance || 0) < 0 ? '' : ' pos'), money(a.balance, a.currency))); ul.append(li);
+      const b = a.balance || 0;
+      const n = h('span', 'mn-row-n'); n.append(h('b', '', shortAcct(a.name)), h('small', '', [a.last_four ? '•• ' + a.last_four : null, /credit|card|sapphire|freedom|bonvoy|aspire|platinum/i.test((a.type || '') + ' ' + a.name) ? 'Card' : /saving/i.test(a.name) ? 'Savings' : /check|ckg/i.test(a.name) ? 'Checking' : /crypto/i.test(a.name) ? 'Crypto' : /invest|brokerage|ira|401/i.test(a.name) ? 'Investing' : 'Account'].filter(Boolean).join(' · ')));
+      li.append(card({ institution: a.institution, account_name: a.name, last_four: a.last_four }), n, h('span', 'mn-amt' + (b > 0.004 ? ' pos' : b < -0.004 ? ' neg' : ' zero'), money(a.balance, a.currency))); ul.append(li);
     }
-    card.append(ul); box.append(card);
+    card_.append(ul); box.append(card_);
   }
   if (!ov.accounts.length) box.append(h('p', 'mn-empty', ov.syncing ? 'Pulling your accounts…' : 'No accounts yet.'));
   el('sec-bank').textContent = ov.source_name;
@@ -700,7 +758,6 @@ el('search').oninput = () => { clearTimeout(timer); timer = setTimeout(() => loa
 window.__wizardCloseOverlay = () => {
   if (menuKey) { closeMenu(); return true; }
   if (popT) { closePop(); return true; }
-  if (!el('fsheet').hidden) { closeFilters(); return true; }
   if (!el('msheet').hidden) { closeManual(); return true; }
   if (!el('t-picker').hidden) { closePicker(); return true; }
   if (!el('sheet').hidden) { closeSheet(); return true; }
@@ -710,6 +767,6 @@ if (!hosted) {
   history.pushState({ wzGuard: 1 }, '', location.href);
   addEventListener('popstate', () => { window.__wizardCloseOverlay(); history.pushState({ wzGuard: 1 }, '', location.href); });
 }
-addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (menuKey) { closeMenu(); return; } if (popT) { closePop(); return; } if (!el('t-picker').hidden) { closePicker(); return; } closeFilters(); closeManual(); closeSheet(); } });
+addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (menuKey) { closeMenu(); return; } if (popT) { closePop(); return; } if (!el('t-picker').hidden) { closePicker(); return; } closeManual(); closeSheet(); } });
 showTab(); refresh();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });

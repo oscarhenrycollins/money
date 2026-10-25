@@ -24,8 +24,7 @@
 
       <section data-panel="review">
         <div class="mn-bar">
-          <input id="search" class="wz-input" type="search" placeholder="Search" aria-label="Search transactions">
-          <button type="button" class="mn-btn mn-fbtn" id="fbtn" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16 M7 12h10 M10 18h4"/></svg><span>Filter</span><i id="fcount" class="mn-fcount" hidden></i></button>
+          <span class="mn-search"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14z M20 20l-4-4"/></svg><input id="search" class="wz-input" type="search" placeholder="Search merchants, notes, categories" aria-label="Search transactions"></span>
         </div>
         <div id="fchips" class="mn-chips mn-active"></div>
         <div id="sumbar" class="mn-sum"></div>
@@ -40,8 +39,11 @@
           <b id="month-label"></b>
           <button type="button" class="mn-btn mn-sm" id="next" aria-label="Next month">›</button>
         </div>
-        <div class="mn-total"><span>Spent</span><b id="spent"></b></div>
-        <ul id="cats" class="mn-cats"></ul>
+        <div id="sp-tiles" class="mn-sum"></div>
+        <div class="mn-spgrid">
+          <div id="sp-chart" class="mn-panel mn-spchart"></div>
+          <ul id="cats" class="mn-cats"></ul>
+        </div>
         <p class="mn-small">Refunds and credits count against their category. Transfers and card payments are left out.</p>
       </section>
 
@@ -49,7 +51,9 @@
         <div class="mn-nw">
           <span>Net worth</span>
           <b id="nw-total"></b>
-          <div class="mn-nw-split"><span>Assets <b id="nw-assets" class="pos"></b></span><span>Owed <b id="nw-debts"></b></span></div>
+          <div id="nw-change" class="mn-change"></div>
+          <div class="mn-nw-split"><span><i class="mn-key in"></i>Assets <b id="nw-assets" class="pos"></b></span><span><i class="mn-key out"></i>Owed <b id="nw-debts"></b></span></div>
+          <div id="nw-split" class="mn-splitbar"><i></i></div>
           <div id="nw-chart" class="mn-chart"></div>
           <div id="nw-range" class="mn-chips mn-range">
             <button type="button" class="mn-chip on" data-range="ytd">This year</button>
@@ -57,12 +61,12 @@
             <button type="button" class="mn-chip" data-range="all">All</button>
           </div>
         </div>
-        <div id="nw-list"></div>
-        <p class="mn-small">Imported balances are as of the import and drop off once SimpleFIN has that account.</p>
+        <div id="nw-list" class="mn-nwgrid"></div>
+        <p class="mn-small">Imported balances are as of the import and drop off once your live connection has that account. Tap an account on the Accounts tab to leave it out.</p>
       </section>
 
       <section data-panel="accounts" hidden>
-        <h3 class="mn-sec"><span class="mn-tag bank" id="sec-bank">SimpleFIN</span> Synced from your banks</h3>
+        <h3 class="mn-sec"><span class="mn-tag bank" id="sec-bank">SimpleFIN</span> Synced from your banks · tap one to leave it out</h3>
         <div id="accts"></div>
         <h3 class="mn-sec"><span class="mn-tag manual">Manual</span> You update these</h3>
         <div id="manual"></div>
@@ -112,17 +116,6 @@
           <button type="button" class="mn-btn mn-go" id="t-save">Save and mark reviewed</button>
           <button type="button" class="mn-btn" id="t-hide">Hide</button>
           <button type="button" class="mn-btn" id="t-close">Close</button>
-        </div>
-      </div>
-    </div>
-    <!-- Filter and sort -->
-    <div class="mn-sheet" id="fsheet" hidden>
-      <div class="mn-sheet-card" role="dialog" aria-modal="true" aria-labelledby="f-title">
-        <b id="f-title" class="mn-sheet-title">Filter and sort</b>
-        <div id="fgroups"></div>
-        <div class="mn-sheet-btns">
-          <button type="button" class="mn-btn mn-go" id="f-done">Show <span id="f-n"></span></button>
-          <button type="button" class="mn-btn" id="f-reset">Reset</button>
         </div>
       </div>
     </div>
