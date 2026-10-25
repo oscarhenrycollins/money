@@ -28,6 +28,7 @@
           <button type="button" class="mn-btn mn-fbtn" id="fbtn" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16 M7 12h10 M10 18h4"/></svg><span>Filter</span><i id="fcount" class="mn-fcount" hidden></i></button>
         </div>
         <div id="fchips" class="mn-chips mn-active"></div>
+        <div id="sumbar" class="mn-sum"></div>
         <div id="list"></div>
         <button type="button" class="mn-btn mn-wide" id="all-done" hidden>Mark these reviewed</button>
         <p id="empty" class="mn-empty" hidden></p>
@@ -149,6 +150,8 @@
       </div>
     </div>
     <!-- Category dropdown opened straight from a review row -->
+    <div class="mn-popbg" id="menubg" hidden></div>
+    <div class="mn-pop mn-menu" id="menu" role="dialog" hidden></div>
     <div class="mn-popbg" id="popbg" hidden></div>
     <div class="mn-pop" id="catpop" role="dialog" aria-label="Choose a category" hidden>
       <input id="pop-q" class="wz-input" type="search" placeholder="Search or create a category" aria-label="Search categories" autocomplete="off">

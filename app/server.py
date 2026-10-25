@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.4.3'
+VERSION = '0.5.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -386,6 +386,8 @@ def transactions(args, c=None):
             q.append('AND COALESCE(e.reviewed,0)=?'); p.append(1 if args['reviewed'] in (True, 'true') else 0)
         if str(args.get('hidden')) not in ('true', 'True'):
             q.append('AND COALESCE(e.hidden,0)=0')
+        if args.get('min_abs') not in (None, ''):
+            q.append('AND ABS(t.amount) >= ?'); p.append(abs(float(args['min_abs'])))
         for key, op in (('min_amount', '>='), ('max_amount', '<=')):
             if args.get(key) not in (None, ''):
                 q.append(f'AND t.amount {op} ?'); p.append(float(args[key]))
@@ -424,13 +426,26 @@ def transactions(args, c=None):
         if args.get('category'):
             want = str(args['category']).lower()
             rows = [r for r in rows if (r['category'] or 'Uncategorized').lower() == want]
-        if args.get('sort') == 'largest':    # biggest amounts first, in or out (absolute value)
+        srt = str(args.get('sort') or '')
+        base, desc = (srt[:-5], True) if srt.endswith('_desc') else (srt, False)
+        text_keys = {'merchant': lambda r: re.sub(r'^\W+', '', r['merchant'] or r['description'] or '').lower(),
+                     'account': lambda r: (r['account_name'] or '').lower(),
+                     'category': lambda r: re.sub(r'^\W+', '', r['category']).lower() if r['category'] else chr(0xffff)}
+        if base in text_keys:
+            rows.sort(key=lambda r: r['date'] or '', reverse=True)
+            rows.sort(key=text_keys[base], reverse=desc)
+        elif srt == 'smallest':
+            rows.sort(key=lambda r: abs(r['amount'] or 0))
+        elif srt == 'largest':    # biggest amounts first, in or out (absolute value)
             rows.sort(key=lambda r: -abs(r['amount'] or 0))
         elif args.get('sort') == 'spend':      # costs the most first: most negative amount at the top
             rows.sort(key=lambda r: (r['amount'] if r['amount'] is not None else 0, r['date'] or ''))
         elif args.get('sort') == 'income':   # biggest money in first
             rows.sort(key=lambda r: -(r['amount'] if r['amount'] is not None else 0))
-        out = {'count': len(rows[:limit]), 'total': len(rows), 'transactions': rows[:limit]}
+        out = {'count': len(rows[:limit]), 'total': len(rows), 'transactions': rows[:limit],
+               'summary': {'out': round(sum(r['amount'] for r in rows if (r['amount'] or 0) < 0), 2),
+                           'in': round(sum(r['amount'] for r in rows if (r['amount'] or 0) > 0), 2),
+                           'uncategorized': sum(1 for r in rows if not r['category'])}}
         if args.get('all') is True:
             out['rows'] = rows
         return out
@@ -816,11 +831,11 @@ def overview():
 TOOLS = [
     {'name': 'money_overview', 'description': "Money app overview: which bank connection it reads (SimpleFIN by default), its accounts with balances, manual accounts (e.g. Bitcoin cold storage), imported history, how many transactions still need review, categories and auto-category rules, last sync.",
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
-    {'name': 'money_transactions', 'description': "Search transactions with the owner's categories, merchant names, notes and reviewed state applied. Filters: from/to (YYYY-MM-DD), account (id, last digits or name), search, category, reviewed (true/false), min_amount/max_amount, direction (out = money out, in = money in), origin (bank = live connection, import = imported history), sort (newest default, oldest, largest = biggest amounts first in or out, spend = costs the most first, income = biggest money in first), limit (default 200). Each row says its origin. Negative = money out.",
+    {'name': 'money_transactions', 'description': "Search transactions with the owner's categories, merchant names, notes and reviewed state applied. Filters: from/to (YYYY-MM-DD), account (id, last digits or name), search, category, reviewed (true/false), min_amount/max_amount, direction (out = money out, in = money in), origin (bank = live connection, import = imported history), min_abs (size at least, in or out), sort (newest default, oldest, largest = biggest amounts first in or out, smallest, merchant/account/category A-Z or *_desc Z-A, spend = costs the most first, income = biggest money in first), limit (default 200). Each row says its origin. Negative = money out.",
      'inputSchema': {'type': 'object', 'properties': {'from': {'type': 'string'}, 'to': {'type': 'string'}, 'account': {'type': 'string'}, 'search': {'type': 'string'}, 'category': {'type': 'string'},
                      'reviewed': {'type': 'boolean'}, 'min_amount': {'type': 'number'}, 'max_amount': {'type': 'number'}, 'limit': {'type': 'integer'},
-                     'direction': {'type': 'string', 'enum': ['out', 'in']}, 'origin': {'type': 'string', 'enum': ['bank', 'import']},
-                     'sort': {'type': 'string', 'enum': ['newest', 'oldest', 'largest', 'spend', 'income']}}, 'additionalProperties': False},
+                     'direction': {'type': 'string', 'enum': ['out', 'in']}, 'min_abs': {'type': 'number'}, 'origin': {'type': 'string', 'enum': ['bank', 'import']},
+                     'sort': {'type': 'string', 'enum': ['newest', 'oldest', 'largest', 'smallest', 'merchant', 'merchant_desc', 'account', 'account_desc', 'category', 'category_desc', 'spend', 'income']}}, 'additionalProperties': False},
      'annotations': {'readOnlyHint': True}},
     {'name': 'money_spending', 'description': 'Spending by category for a month (YYYY-MM, default this month); refunds and credits net against their category; transfers and card payments excluded.',
      'inputSchema': {'type': 'object', 'properties': {'month': {'type': 'string'}}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
