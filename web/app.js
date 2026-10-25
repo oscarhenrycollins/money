@@ -288,7 +288,16 @@ function paintList(r, stale) {
 
 /* ---------- column menus: sort and filter per column ---------- */
 let menuKey = null, menuBtn = null;
+function mobilePopup(pop) {
+  if (!matchMedia('(max-width: 700px)').matches) return false;
+  const v = window.visualViewport;
+  const top = v ? v.offsetTop : 0, height = v ? v.height : innerHeight;
+  Object.assign(pop.style, {left: '8px', width: (innerWidth - 16) + 'px', bottom: 'auto', maxHeight: Math.max(120, height - 24) + 'px'});
+  pop.style.top = (top + height - Math.min(pop.scrollHeight, height - 24) - 8) + 'px';
+  return true;
+}
 function placeAt(pop, anchor, width) {
+  if (mobilePopup(pop)) return;
   const r = anchor.getBoundingClientRect(), W = innerWidth, H = innerHeight;
   const w = Math.min(width, W - 16); pop.style.width = w + 'px';
   pop.style.left = Math.max(8, Math.min(r.left, W - w - 8)) + 'px';
@@ -424,6 +433,7 @@ function openPop(t, anchor) {
 }
 function placePop() {
   if (!popBtn) return;
+  if (mobilePopup(el('catpop'))) return;
   const pop = el('catpop'), r = popBtn.getBoundingClientRect(), W = innerWidth, H = innerHeight;
   const w = Math.min(320, W - 16); pop.style.width = w + 'px';
   pop.style.left = Math.max(8, Math.min(r.left, W - w - 8)) + 'px';
@@ -434,12 +444,12 @@ function placePop() {
   if (up) { pop.style.top = ''; pop.style.bottom = (H - r.top + 6) + 'px'; } else { pop.style.bottom = ''; pop.style.top = (r.bottom + 6) + 'px'; }
 }
 function drawPop() { if (popT) catList(el('pop-list'), el('pop-q').value, popT.category, setRowCat); }
-function closePop() { el('catpop').hidden = true; el('popbg').hidden = true; popBtn?.setAttribute('aria-expanded', 'false'); popT = null; popBtn = null; }
+function closePop() { if (el('catpop').contains(document.activeElement)) document.activeElement.blur(); el('catpop').hidden = true; el('popbg').hidden = true; popBtn?.setAttribute('aria-expanded', 'false'); popT = null; popBtn = null; }
 async function setRowCat(c) {
   const t = popT, b = popBtn; closePop();
   if (!t || c === t.category) return;
   const before = t.category; t.category = c; remember_cat(c);
-  if (b) { b.firstChild.textContent = c; b.classList.remove('none'); }
+  if (b) { b.querySelector('span').textContent = c; b.querySelector('.mn-ci').replaceWith(catIcon(c)); b.classList.remove('none'); }
   try { await api('api/update', { source: t.source, id: t.id, category: c }); say(`Set to ${c}.`, 'note', true); refresh(); }
   catch (e) { t.category = before; if (b) b.querySelector('span').textContent = before || 'Uncategorized'; say(e.message, 'error'); }
 }
@@ -449,7 +459,13 @@ el('pop-q').onkeydown = (e) => {
   if (e.key === 'Escape') { e.stopPropagation(); closePop(); }
 };
 el('popbg').onclick = closePop;
-addEventListener('resize', () => { closePop(); closeMenu(); });
+function repositionPickers() {
+  if (popT) placePop();
+  if (menuKey && menuBtn) placeAt(el('menu'), menuBtn, 320);
+}
+addEventListener('resize', repositionPickers);
+window.visualViewport?.addEventListener('resize', repositionPickers);
+window.visualViewport?.addEventListener('scroll', repositionPickers);
 el('list').closest('.wz-scroll')?.addEventListener('scroll', () => { if (popT) placePop(); }, { passive: true });
 el('t-catbtn').onclick = () => (el('t-picker').hidden ? openPicker() : closePicker());
 el('t-catq').oninput = drawCats;
