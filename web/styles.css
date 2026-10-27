@@ -485,3 +485,15 @@ input.wz-input, select.wz-input, textarea.wz-input { font-size: 16px; }
   .mn-table .mn-row:nth-child(2) { border-top: 0; }
   .mn-table .mn-row:nth-child(even) { border-left: 1px solid var(--line); }
 }
+
+/* Attention: a bank stopped updating or needs reconnecting. Shown on every tab until it is fixed. */
+.mn-alerts { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.mn-alerts[hidden] { display: none; }
+.mn-alert { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px; border-radius: 16px; background: color-mix(in srgb, var(--warn) 16%, var(--base)); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--warn) 55%, transparent); }
+.mn-alert-ic { width: 32px; height: 32px; }
+.mn-alert-t { flex: 1 1 220px; min-width: 0; }
+.mn-alert-t b { display: block; font-size: 15px; color: var(--ink); }
+.mn-alert-t p { margin: 2px 0 0; font-size: 13.5px; line-height: 1.4; color: var(--ink-2); }
+.mn-alert .mn-go { align-self: center; display: inline-flex; align-items: center; text-decoration: none; }
+.mn-bank.mn-stale { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--warn) 55%, transparent); }
+.mn-bank-h .mn-tag.pend { display: inline-block; margin-top: 4px; }

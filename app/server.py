@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.7.2'
+VERSION = '0.8.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -33,6 +33,13 @@ SOURCES = [s.split('=', 1) for s in os.environ.get('MONEY_SOURCES',
            'wizard-simplefin=http://wizard-simplefin:8808,wizard-monarch=http://wizard-monarch:8806,'
            'wizard-teller=http://wizard-teller:8805').split(',') if '=' in s]
 NAMES = {'wizard-simplefin': 'SimpleFIN', 'wizard-monarch': 'Monarch', 'wizard-teller': 'Teller'}
+# Where the owner fixes a bank that stopped updating (his own account on the provider's site).
+FIX_URLS = {'wizard-simplefin': 'https://beta-bridge.simplefin.org/', 'wizard-monarch': 'https://app.monarchmoney.com/settings/institutions',
+            'wizard-teller': None}
+# A bank whose newest balance is older than this many days is called out as behind.
+STALE_DAYS = int(os.environ.get('MONEY_STALE_DAYS', '2'))
+# Money's own refresh is called out when it is this many hours old.
+STALE_SYNC_HOURS = float(os.environ.get('MONEY_STALE_SYNC_HOURS', '6'))
 CATEGORIES = ['Groceries', 'Restaurants', 'Coffee', 'Shopping', 'Travel', 'Hotels', 'Flights', 'Rides & Taxis', 'Gas',
               'Rent', 'Utilities', 'Phone & Internet', 'Subscriptions', 'Health', 'Entertainment', 'Fees', 'Gifts',
               'Business', 'Income', 'Refunds & Credits', 'Transfer', 'Card Payment', 'Other']
@@ -194,6 +201,14 @@ def sync(source=None):
         if not base:
             raise Problem(400, 'Unknown bank connection.')
         accts = _get(base, '/api/accounts').get('accounts') or []
+        # The connector's own view of each bank (signed out, errors). Best effort: older connectors may not answer.
+        try:
+            st = _get(base, '/api/status', timeout=10)
+            health = {'source': source, 'error': st.get('error') or st.get('last_error'),
+                      'banks': [{'institution': b.get('institution'), 'status': b.get('status'), 'error': b.get('error')}
+                                for b in st.get('banks') or []]}
+        except Problem:
+            health = None
         # Page newest -> oldest by date (connectors return at most 1000 rows per call).
         since = (dt.date.today() - dt.timedelta(days=HISTORY_DAYS)).isoformat()
         rows, to, guard = {}, None, 0
@@ -231,6 +246,7 @@ def sync(source=None):
                         c.execute("DELETE FROM tx WHERE source=? AND status='pending' AND seen<>?", (source, now))
                     _set(c, 'last_sync', now)
                     _set(c, 'last_error', None)
+                    _set(c, 'health', health)
             finally:
                 c.close()
         return {'source': source, 'accounts': len(accts), 'transactions': len(rows)}
@@ -799,6 +815,58 @@ def spending(month=None):
             'categories': sorted(({'category': k, 'amount': v} for k, v in cats.items()), key=lambda x: -x['amount'])}
 
 
+def _days_ago(d, today):
+    try:
+        return (today - dt.date.fromisoformat(str(d)[:10])).days
+    except ValueError:
+        return None
+
+
+def attention(c, src, allaccts, visible):
+    """Problems the owner must see: a bank that stopped updating, a bank signed out, or Money unable to refresh.
+    Each item says what is wrong and where he fixes it."""
+    name, fix, app = NAMES.get(src, src), FIX_URLS.get(src), '/' + src + '/'
+    today = dt.datetime.now(dt.timezone.utc).date()
+    out = []
+    err, last = _setting(c, 'last_error'), _setting(c, 'last_sync')
+    if err:
+        out.append({'kind': 'sync', 'institution': None, 'title': f"Money can't refresh from {name}",
+                    'message': err, 'fix_url': app, 'fix_label': f'Open {name}'})
+    elif last and not SYNCING.is_set():
+        hrs = (dt.datetime.now(dt.timezone.utc) - dt.datetime.strptime(last, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)).total_seconds() / 3600
+        if hrs > STALE_SYNC_HOURS:
+            out.append({'kind': 'sync', 'institution': None, 'title': f"Money hasn't refreshed in {int(hrs)} hours",
+                        'message': f'Last refresh {last[:16].replace("T", " ")} UTC. Tap Refresh now on the Accounts tab.', 'fix_url': None, 'fix_label': None})
+    health = _setting(c, 'health') or {}
+    if health.get('source') != src:
+        health = {}
+    if health.get('error'):
+        out.append({'kind': 'connection', 'institution': None, 'title': f'{name} needs attention',
+                    'message': health['error'], 'fix_url': app, 'fix_label': f'Open {name}'})
+    shown = {a['institution'] for a in visible}
+    flagged = set()
+    for b in health.get('banks') or []:
+        if b.get('institution') in shown and (b.get('error') or (b.get('status') or 'connected') != 'connected'):
+            flagged.add(b['institution'])
+            out.append({'kind': 'signed_out', 'institution': b['institution'], 'title': f"{b['institution']} needs you to reconnect",
+                        'message': (b.get('error') or f'{name} lost access to {b["institution"]}.') + f' Sign in to {b["institution"]} again on {name}.',
+                        'fix_url': fix or app, 'fix_label': f'Fix on {name}'})
+    newest = {}
+    for a in allaccts:
+        d = str(a.get('balance_at') or '')[:10]
+        if DATE_RE.match(d) and d > newest.get(a['institution'], ''):
+            newest[a['institution']] = d
+    for inst in sorted(shown - flagged, key=lambda x: x or ''):
+        d = newest.get(inst)
+        days = _days_ago(d, today) if d else None
+        if days is not None and days > STALE_DAYS:
+            out.append({'kind': 'behind', 'institution': inst, 'as_of': d, 'days': days, 'title': f'{inst} stopped updating',
+                        'message': f'Nothing new from {inst} since {dt.date.fromisoformat(d).strftime("%b")} {dt.date.fromisoformat(d).day} ({days} days), and {name} '
+                                   f'shows no error. Its balances and transactions here are out of date. Reconnecting {inst} on {name} usually fixes it.',
+                        'fix_url': fix or app, 'fix_label': f'Fix on {name}'})
+    return out
+
+
 def overview():
     srcs = sources()
     c = db()
@@ -818,7 +886,8 @@ def overview():
                'accounts': accts, 'hidden_accounts': hidden_accts, 'manual': manual_accounts(c), 'history': hist,
                'to_review': sum(1 for r in allrows if not r['reviewed']), 'transactions': len(allrows),
                'categories': cats, 'rules': _rules(c),
-               'last_sync': _setting(c, 'last_sync'), 'error': _setting(c, 'last_error'), 'syncing': SYNCING.is_set()}
+               'last_sync': _setting(c, 'last_sync'), 'error': _setting(c, 'last_error'), 'syncing': SYNCING.is_set(),
+               'attention': attention(c, src, allaccts, accts)}
     finally:
         c.close()
     cash = sum(a['balance'] or 0 for a in accts if (a['type'] or '') in ('depository', 'checking', 'savings') or re.search(r'check|saving|ckg', (a['name'] or ''), re.I))
@@ -829,7 +898,7 @@ def overview():
 # ---------------- MCP ----------------
 
 TOOLS = [
-    {'name': 'money_overview', 'description': "Money app overview: which bank connection it reads (SimpleFIN by default), its accounts with balances, manual accounts (e.g. Bitcoin cold storage), imported history, how many transactions still need review, categories and auto-category rules, last sync.",
+    {'name': 'money_overview', 'description': "Money app overview: which bank connection it reads (SimpleFIN by default), attention (banks that stopped updating or need reconnecting, or Money unable to refresh; tell the owner first), its accounts with balances, manual accounts (e.g. Bitcoin cold storage), imported history, how many transactions still need review, categories and auto-category rules, last sync.",
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
     {'name': 'money_transactions', 'description': "Search transactions with the owner's categories, merchant names, notes and reviewed state applied. Filters: from/to (YYYY-MM-DD), account (id, last digits or name), search, category, reviewed (true/false), min_amount/max_amount, direction (out = money out, in = money in), origin (bank = live connection, import = imported history), min_abs (size at least, in or out), sort (newest default, oldest, largest = biggest amounts first in or out, smallest, merchant/account/category A-Z or *_desc Z-A, spend = costs the most first, income = biggest money in first), limit (default 200). Each row says its origin. Negative = money out.",
      'inputSchema': {'type': 'object', 'properties': {'from': {'type': 'string'}, 'to': {'type': 'string'}, 'account': {'type': 'string'}, 'search': {'type': 'string'}, 'category': {'type': 'string'},
