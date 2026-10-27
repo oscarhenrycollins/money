@@ -751,6 +751,9 @@ el('search').oninput = () => { clearTimeout(timer); timer = setTimeout(() => loa
 
 /* Back: wizard-sheet.js (loaded after this file) closes the open sheet first, then falls back to this. */
 window.__wizardCloseOverlay = () => false;
+/* Inside the shell, Back (and Esc on the desktop) reach this app through WizardApp.back, not __wizardCloseOverlay,
+ * and the desktop shell consumes the Esc key itself. Route both to the open sheet so they close it there too. */
+try { window.WizardApp?.back?.register({ canGoBack: () => !!document.querySelector('dialog.wz-sheet[open]'), back: () => window.__wizardCloseOverlay() === true }); } catch (e) {}
 if (!hosted) {
   history.pushState({ wzGuard: 1 }, '', location.href);
   addEventListener('popstate', () => { window.__wizardCloseOverlay(); history.pushState({ wzGuard: 1 }, '', location.href); });
