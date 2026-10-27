@@ -51,6 +51,7 @@ function paintOverview(data) {
   el('setup').hidden = ready || anyConnected || ov.syncing;
   el('badge').hidden = !ov.to_review; el('badge').textContent = ov.to_review > 99 ? '99+' : ov.to_review;
   try { window.WizardApp?.badge?.set(ov.to_review); } catch (e) {}
+  renderAlerts();
   renderAccounts();
   clearTimeout(poll);
   if (ov.syncing) poll = setTimeout(() => refresh(), 4000);
@@ -616,6 +617,26 @@ function drawChart() {
 }
 el('nw-range').querySelectorAll('.mn-chip').forEach((b) => b.onclick = () => { nwRange = b.dataset.range; el('nw-range').querySelectorAll('.mn-chip').forEach((x) => x.classList.toggle('on', x === b)); drawChart(); });
 
+/* ---------- attention: never fail silently ---------- */
+function renderAlerts() {
+  const box = el('alerts'), list = ov.attention || [];
+  box.replaceChildren(); box.hidden = !list.length;
+  for (const a of list) {
+    const row = h('div', 'mn-alert');
+    const ic = h('em', 'mn-ci mn-alert-ic'); ic.style.setProperty('--ic', WARN);
+    ic.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${IC.warn}"/></svg>`;
+    const t = h('div', 'mn-alert-t'); t.append(h('b', '', a.title), h('p', '', a.message));
+    row.append(ic, t);
+    if (a.fix_url) {
+      const go = h('a', 'mn-btn mn-sm mn-go', a.fix_label || 'Fix it'); go.href = a.fix_url;
+      if (/^https?:/.test(a.fix_url)) { go.target = '_blank'; go.rel = 'noopener noreferrer'; go.textContent += ' ↗'; }
+      row.append(go);
+    }
+    box.append(row);
+  }
+}
+const behind = (inst) => (ov.attention || []).find((a) => a.institution === inst);
+
 /* ---------- accounts ---------- */
 function renderAccounts() {
   const box = el('accts'); box.replaceChildren();
@@ -625,9 +646,11 @@ function renderAccounts() {
   for (const [inst, list] of groups) {
     const sum = list.reduce((s, a) => s + (a.balance || 0), 0);
     const asof = list.map((a) => a.balance_at).filter(Boolean).sort().pop();
-    const card_ = h('div', 'mn-bank');
+    const issue = behind(inst);
+    const card_ = h('div', 'mn-bank' + (issue ? ' mn-stale' : ''));
     const hd = h('div', 'mn-bank-h'); const logo = card({ institution: inst, account_name: inst }); logo.classList.add('mn-logo'); logo.querySelector('b').textContent = '';
     const ht = h('span', 'mn-row-n'); ht.append(h('b', '', inst), h('small', '', `${list.length} account${list.length === 1 ? '' : 's'}${asof ? ' · as of ' + day(String(asof).slice(0, 10)) : ''}`));
+    if (issue) ht.append(h('span', 'mn-tag pend', issue.kind === 'behind' ? `Out of date · last update ${day(issue.as_of)}` : 'Needs reconnecting'));
     hd.append(logo, ht, h('span', 'mn-amt' + (sum > 0.004 ? ' pos' : sum < -0.004 ? ' neg' : ' zero'), money(sum)));
     card_.append(hd);
     const ul = h('ul', 'mn-accts');
