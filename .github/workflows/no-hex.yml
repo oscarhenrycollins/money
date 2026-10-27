@@ -1,0 +1,11 @@
+name: No colour literals
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  no-hex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh tests/no-hex.sh
