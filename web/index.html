@@ -8,9 +8,11 @@
   <script src="boot.js"></script>
   <script src="/wizard-os-home/core/app-client.js"></script>
   <link rel="stylesheet" href="wizard-ui.css">
+  <link rel="stylesheet" href="wizard-layout.css">
   <link rel="stylesheet" href="styles.css">
   <script defer src="theme-client.js"></script>
   <script defer src="app.js"></script>
+  <script defer src="wizard-sheet.js"></script>
 </head>
 <body>
   <div class="wz-app mn-app">
@@ -95,61 +97,64 @@
     </nav>
 
     <!-- One transaction -->
-    <div class="mn-sheet" id="sheet" hidden>
-      <div class="mn-sheet-card" role="dialog" aria-modal="true" aria-labelledby="t-merchant">
-        <div class="mn-sheet-top">
-          <div><b id="t-merchant"></b><small id="t-meta"></small></div>
-          <b id="t-amount" class="mn-amt"></b>
-        </div>
-        <label class="mn-lab">Category</label>
-        <button type="button" class="mn-catbtn" id="t-catbtn" aria-haspopup="listbox"><span id="t-catname">Uncategorized</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-        <div class="mn-picker" id="t-picker" hidden>
-          <input id="t-catq" class="wz-input" type="search" placeholder="Search or create a category" aria-label="Search categories" autocomplete="off">
-          <ul id="t-cats" class="mn-catlist" role="listbox" aria-label="Categories"></ul>
-        </div>
-        <label class="mn-check"><input type="checkbox" id="t-rule"> <span id="t-rule-text">Always use this for this merchant</span></label>
-        <label class="mn-lab" for="t-name">Name</label>
-        <input id="t-name" class="wz-input" maxlength="60">
-        <label class="mn-lab" for="t-note">Note</label>
-        <input id="t-note" class="wz-input" maxlength="300" placeholder="Optional">
-        <div class="mn-sheet-btns">
-          <button type="button" class="mn-btn mn-go" id="t-save">Save and mark reviewed</button>
-          <button type="button" class="mn-btn" id="t-hide">Hide</button>
-          <button type="button" class="mn-btn" id="t-close">Close</button>
-        </div>
+    <dialog class="wz-sheet mn-dlg" id="sheet" aria-labelledby="t-merchant">
+      <div class="mn-sheet-top">
+        <div><b id="t-merchant"></b><small id="t-meta"></small></div>
+        <b id="t-amount" class="mn-amt"></b>
       </div>
-    </div>
+      <label class="mn-lab">Category</label>
+      <button type="button" class="mn-catbtn" id="t-catbtn" aria-haspopup="listbox"><span id="t-catname">Uncategorized</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+      <div class="mn-picker" id="t-picker" hidden>
+        <input id="t-catq" class="wz-input" type="search" placeholder="Search or create a category" aria-label="Search categories" autocomplete="off">
+        <ul id="t-cats" class="mn-catlist" role="listbox" aria-label="Categories"></ul>
+      </div>
+      <label class="mn-check"><input type="checkbox" id="t-rule"> <span id="t-rule-text">Always use this for this merchant</span></label>
+      <label class="mn-lab" for="t-name">Name</label>
+      <input id="t-name" class="wz-input" maxlength="60">
+      <label class="mn-lab" for="t-note">Note</label>
+      <input id="t-note" class="wz-input" maxlength="300" placeholder="Optional">
+      <div class="mn-sheet-btns">
+        <button type="button" class="mn-btn mn-go" id="t-save">Save and mark reviewed</button>
+        <button type="button" class="mn-btn" id="t-hide">Hide</button>
+        <button type="button" class="mn-btn" id="t-close">Close</button>
+      </div>
+    </dialog>
     <!-- Manual account -->
-    <div class="mn-sheet" id="msheet" hidden>
-      <div class="mn-sheet-card" role="dialog" aria-modal="true" aria-labelledby="m-title">
-        <b id="m-title" class="mn-sheet-title">Manual account</b>
-        <label class="mn-lab" for="m-name">Name</label>
-        <input id="m-name" class="wz-input" maxlength="60" placeholder="e.g. Cold storage">
-        <label class="mn-lab">Holds</label>
-        <div class="mn-chips" id="m-kind">
-          <button type="button" class="mn-chip on" data-kind="btc">Bitcoin</button>
-          <button type="button" class="mn-chip" data-kind="usd">Dollars</button>
-        </div>
-        <label class="mn-lab" for="m-amount" id="m-amount-lab">Amount in BTC</label>
-        <input id="m-amount" class="wz-input" inputmode="decimal" placeholder="0.25">
-        <p class="mn-small" id="m-hint">Valued at the live Bitcoin price. Never type a seed phrase or private key here.</p>
-        <label class="mn-lab" for="m-note">Note</label>
-        <input id="m-note" class="wz-input" maxlength="200" placeholder="Optional">
-        <div class="mn-sheet-btns">
-          <button type="button" class="mn-btn mn-go" id="m-save">Save</button>
-          <button type="button" class="mn-btn" id="m-del" hidden>Delete</button>
-          <button type="button" class="mn-btn" id="m-close">Close</button>
-        </div>
+    <dialog class="wz-sheet mn-dlg" id="msheet" aria-labelledby="m-title">
+      <b id="m-title" class="mn-sheet-title">Manual account</b>
+      <label class="mn-lab" for="m-name">Name</label>
+      <input id="m-name" class="wz-input" maxlength="60" placeholder="e.g. Cold storage">
+      <label class="mn-lab">Holds</label>
+      <div class="mn-chips" id="m-kind">
+        <button type="button" class="mn-chip on" data-kind="btc">Bitcoin</button>
+        <button type="button" class="mn-chip" data-kind="usd">Dollars</button>
       </div>
-    </div>
+      <label class="mn-lab" for="m-amount" id="m-amount-lab">Amount in BTC</label>
+      <input id="m-amount" class="wz-input" inputmode="decimal" placeholder="0.25">
+      <p class="mn-small" id="m-hint">Valued at the live Bitcoin price. Never type a seed phrase or private key here.</p>
+      <label class="mn-lab" for="m-note">Note</label>
+      <input id="m-note" class="wz-input" maxlength="200" placeholder="Optional">
+      <div class="mn-sheet-btns">
+        <button type="button" class="mn-btn mn-go" id="m-save">Save</button>
+        <button type="button" class="mn-btn" id="m-del" hidden>Delete</button>
+        <button type="button" class="mn-btn" id="m-close">Close</button>
+      </div>
+    </dialog>
+    <!-- Sort and filter for one column of the review table -->
+    <dialog class="wz-sheet mn-dlg mn-menu" id="menu" aria-label="Sort and filter"><div id="menu-body" class="mn-menu-body"></div></dialog>
     <!-- Category dropdown opened straight from a review row -->
-    <div class="mn-popbg" id="menubg" hidden></div>
-    <div class="mn-pop mn-menu" id="menu" role="dialog" hidden></div>
-    <div class="mn-popbg" id="popbg" hidden></div>
-    <div class="mn-pop" id="catpop" role="dialog" aria-label="Choose a category" hidden>
+    <dialog class="wz-sheet mn-dlg mn-pop" id="catpop" aria-label="Choose a category">
       <input id="pop-q" class="wz-input" type="search" placeholder="Search or create a category" aria-label="Search categories" autocomplete="off">
       <ul id="pop-list" class="mn-catlist" role="listbox" aria-label="Categories"></ul>
-    </div>
+    </dialog>
+    <!-- Yes/no question before leaving out or deleting an account -->
+    <dialog class="wz-sheet mn-dlg" id="ask" aria-labelledby="ask-text">
+      <p id="ask-text" class="mn-ask"></p>
+      <div class="mn-sheet-btns">
+        <button type="button" class="mn-btn mn-go" id="ask-ok">OK</button>
+        <button type="button" class="mn-btn" id="ask-no">Cancel</button>
+      </div>
+    </dialog>
     <p id="status" class="wz-status" role="status" aria-live="polite"></p>
   </div>
 </body>

@@ -287,25 +287,12 @@ function paintList(r, stale) {
 }
 
 /* ---------- column menus: sort and filter per column ---------- */
+/* Every pop-up is the shared sheet (wizard-sheet.js): bottom sheet when narrow, centred card when wide. */
+const openDlg = (d) => (window.WzSheet ? WzSheet.open(d) : d.showModal());
+const closeDlg = (d) => { if (d.open) d.close(); };
 let menuKey = null, menuBtn = null;
-function mobilePopup(pop) {
-  if (!matchMedia('(max-width: 700px)').matches) return false;
-  const v = window.visualViewport;
-  const top = v ? v.offsetTop : 0, height = v ? v.height : innerHeight;
-  Object.assign(pop.style, {left: '8px', width: (innerWidth - 16) + 'px', bottom: 'auto', maxHeight: Math.max(120, height - 24) + 'px'});
-  pop.style.top = (top + height - Math.min(pop.scrollHeight, height - 24) - 8) + 'px';
-  return true;
-}
-function placeAt(pop, anchor, width) {
-  if (mobilePopup(pop)) return;
-  const r = anchor.getBoundingClientRect(), W = innerWidth, H = innerHeight;
-  const w = Math.min(width, W - 16); pop.style.width = w + 'px';
-  pop.style.left = Math.max(8, Math.min(r.left, W - w - 8)) + 'px';
-  const below = H - r.bottom - 12, above = r.top - 12, up = below < 260 && above > below;
-  pop.style.maxHeight = Math.max(180, Math.min(440, up ? above : below)) + 'px';
-  if (up) { pop.style.top = ''; pop.style.bottom = (H - r.top + 6) + 'px'; } else { pop.style.bottom = ''; pop.style.top = (r.bottom + 6) + 'px'; }
-}
-function closeMenu() { el('menu').hidden = true; el('menubg').hidden = true; menuKey = null; menuBtn = null; }
+function closeMenu() { closeDlg(el('menu')); }
+el('menu').addEventListener('close', () => { menuKey = null; menuBtn = null; });
 function mItem(text, on, fn, icon) {
   const b = h('button', 'mn-mi' + (on ? ' on' : '')); b.type = 'button';
   if (icon) b.append(icon); b.append(h('span', '', text));
@@ -313,7 +300,7 @@ function mItem(text, on, fn, icon) {
 }
 function mSec(t) { return h('div', 'mn-mh', t); }
 function drawMenu() {
-  const m = el('menu'); m.replaceChildren();
+  const m = el('menu-body'); m.replaceChildren();
   const col = COLS.find((c) => c[0] === menuKey); if (!col) return;
   const [k, title, asc, desc] = col;
   const sortTo = (v) => { f.sort = v; saveF(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
@@ -363,9 +350,8 @@ function drawMenu() {
 function openMenu(k, btn) {
   if (menuKey === k) { closeMenu(); return; }
   closePop?.(); menuKey = k; menuBtn = btn;
-  drawMenu(); el('menubg').hidden = false; el('menu').hidden = false; placeAt(el('menu'), btn, k === 'account' || k === 'category' ? 320 : 280);
+  drawMenu(); openDlg(el('menu'));
 }
-el('menubg').onclick = closeMenu;
 
 function setF(key, v) { f[key] = v; saveF(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); }
 renderFilterChips();
@@ -379,9 +365,12 @@ function openSheet(t) {
   el('t-rule-text').textContent = `Always use this for “${(t.merchant || t.description || '').slice(0, 30)}”`;
   el('t-catq').value = ''; closePicker(); showPick();
   el('t-hide').textContent = t.hidden ? 'Unhide' : 'Hide';
-  el('sheet').hidden = false;
+  openDlg(el('sheet'));
 }
-const closeSheet = () => { el('sheet').hidden = true; cur = null; closePicker(); };
+const closeSheet = () => closeDlg(el('sheet'));
+el('sheet').addEventListener('close', () => { cur = null; closePicker(); });
+/* Esc with the category list open folds the list first, as before */
+el('sheet').addEventListener('cancel', (e) => { if (!el('t-picker').hidden) { e.preventDefault(); closePicker(); } });
 
 /* category picker */
 const RKEY = 'money.recentcats.v1';
@@ -427,24 +416,14 @@ function openPop(t, anchor) {
   if (popT === t) { closePop(); return; }
   closePop();
   popT = t; popBtn = anchor; anchor.setAttribute('aria-expanded', 'true');
-  const pop = el('catpop'); el('pop-q').value = '';
-  drawPop(); el('popbg').hidden = false; pop.hidden = false; placePop();
+  el('pop-q').value = '';
+  drawPop(); openDlg(el('catpop'));
   if (matchMedia('(hover: hover)').matches) el('pop-q').focus({ preventScroll: true });
-}
-function placePop() {
-  if (!popBtn) return;
-  if (mobilePopup(el('catpop'))) return;
-  const pop = el('catpop'), r = popBtn.getBoundingClientRect(), W = innerWidth, H = innerHeight;
-  const w = Math.min(320, W - 16); pop.style.width = w + 'px';
-  pop.style.left = Math.max(8, Math.min(r.left, W - w - 8)) + 'px';
-  const below = H - r.bottom - 12, above = r.top - 12;
-  const up = below < 260 && above > below;
-  const room = Math.max(180, Math.min(380, up ? above : below));
-  pop.style.maxHeight = room + 'px';
-  if (up) { pop.style.top = ''; pop.style.bottom = (H - r.top + 6) + 'px'; } else { pop.style.bottom = ''; pop.style.top = (r.bottom + 6) + 'px'; }
+  el('pop-list').scrollTop = 0;
 }
 function drawPop() { if (popT) catList(el('pop-list'), el('pop-q').value, popT.category, setRowCat); }
-function closePop() { if (el('catpop').contains(document.activeElement)) document.activeElement.blur(); el('catpop').hidden = true; el('popbg').hidden = true; popBtn?.setAttribute('aria-expanded', 'false'); popT = null; popBtn = null; }
+function closePop() { closeDlg(el('catpop')); }
+el('catpop').addEventListener('close', () => { popBtn?.setAttribute('aria-expanded', 'false'); popT = null; popBtn = null; });
 async function setRowCat(c) {
   const t = popT, b = popBtn; closePop();
   if (!t || c === t.category) return;
@@ -456,25 +435,13 @@ async function setRowCat(c) {
 el('pop-q').oninput = drawPop;
 el('pop-q').onkeydown = (e) => {
   if (e.key === 'Enter') { e.preventDefault(); el('pop-list').querySelector('button')?.click(); }
-  if (e.key === 'Escape') { e.stopPropagation(); closePop(); }
 };
-el('popbg').onclick = closePop;
-function repositionPickers() {
-  if (popT) placePop();
-  if (menuKey && menuBtn) placeAt(el('menu'), menuBtn, 320);
-}
-addEventListener('resize', repositionPickers);
-window.visualViewport?.addEventListener('resize', repositionPickers);
-window.visualViewport?.addEventListener('scroll', repositionPickers);
-el('list').closest('.wz-scroll')?.addEventListener('scroll', () => { if (popT) placePop(); }, { passive: true });
 el('t-catbtn').onclick = () => (el('t-picker').hidden ? openPicker() : closePicker());
 el('t-catq').oninput = drawCats;
 el('t-catq').onkeydown = (e) => {
   if (e.key === 'Enter') { e.preventDefault(); el('t-cats').querySelector('button')?.click(); }
-  if (e.key === 'Escape') { e.stopPropagation(); closePicker(); }
 };
 el('t-close').onclick = closeSheet;
-el('sheet').onclick = (e) => { if (e.target === el('sheet')) closeSheet(); };
 el('t-save').onclick = async () => {
   const t = cur; if (!t) return;
   const body = { source: t.source, id: t.id, reviewed: true, note: el('t-note').value };
@@ -497,6 +464,17 @@ el('all-done').onclick = async () => {
     say(`${rows.length} marked reviewed.`, 'note', true); refresh();
   } catch (e) { say(e.message, 'error'); }
 };
+/* A yes/no question in the shared sheet (replaces the browser's confirm box). Resolves true on OK only. */
+function ask(text, ok) {
+  return new Promise((done) => {
+    const d = el('ask'); let yes = false;
+    el('ask-text').textContent = text; el('ask-ok').textContent = ok;
+    el('ask-ok').onclick = () => { yes = true; closeDlg(d); };
+    el('ask-no').onclick = () => closeDlg(d);
+    d.addEventListener('close', () => done(yes), { once: true });
+    openDlg(d);
+  });
+}
 async function doUndo() { try { await api('api/undo', {}); say('Undone.', 'note'); refresh(); } catch (e) { say(e.message, 'error'); } }
 
 /* ---------- spending ---------- */
@@ -659,7 +637,7 @@ function renderAccounts() {
     for (const a of [...list].sort((x, y) => Math.abs(y.balance || 0) - Math.abs(x.balance || 0))) {
       const li = h('li', 'mn-tap'); li.tabIndex = 0; li.title = 'Tap to leave this account out of Money';
       li.onclick = async () => {
-        if (!confirm(`Leave ${a.name} out of Money? It disappears from transactions, spending and net worth. You can bring it back at the bottom of this tab.`)) return;
+        if (!(await ask(`Leave ${a.name} out of Money? It disappears from transactions, spending and net worth. You can bring it back at the bottom of this tab.`, 'Leave it out'))) return;
         try { ov = await api('api/accounts/hide', { account: a.id, hidden: true }); say(`${a.name} hidden.`, 'note'); refresh(); } catch (e) { say(e.message, 'error'); }
       };
       const b = a.balance || 0;
@@ -729,13 +707,13 @@ function openManual(m) {
   mcur = m || null;
   el('m-title').textContent = m ? m.name : 'New manual account';
   el('m-name').value = m ? m.name : ''; el('m-amount').value = m ? m.amount : ''; el('m-note').value = m ? (m.note || '') : '';
-  setKind(m ? m.kind : 'btc'); el('m-del').hidden = !m; el('msheet').hidden = false;
+  setKind(m ? m.kind : 'btc'); el('m-del').hidden = !m; openDlg(el('msheet'));
 }
-const closeManual = () => { el('msheet').hidden = true; mcur = null; };
+const closeManual = () => closeDlg(el('msheet'));
+el('msheet').addEventListener('close', () => { mcur = null; });
 el('m-kind').querySelectorAll('.mn-chip').forEach((b) => b.onclick = () => setKind(b.dataset.kind));
 el('add-manual').onclick = () => openManual(null);
 el('m-close').onclick = closeManual;
-el('msheet').onclick = (e) => { if (e.target === el('msheet')) closeManual(); };
 el('m-save').onclick = async () => {
   try {
     await api('api/manual', { id: mcur?.id, name: el('m-name').value, kind: mkind, amount: el('m-amount').value.replace(/,/g, ''), note: el('m-note').value });
@@ -743,7 +721,7 @@ el('m-save').onclick = async () => {
   } catch (e) { say(e.message, 'error'); }
 };
 el('m-del').onclick = async () => {
-  if (!mcur || !confirm(`Delete ${mcur.name}?`)) return;
+  if (!mcur || !(await ask(`Delete ${mcur.name}?`, 'Delete'))) return;
   try { await api(`api/manual/${mcur.id}/delete`, {}); closeManual(); say('Deleted.', 'note'); refresh(); } catch (e) { say(e.message, 'error'); }
 };
 
@@ -771,18 +749,11 @@ async function refresh() {
 }
 el('search').oninput = () => { clearTimeout(timer); timer = setTimeout(() => loadList().catch((e) => say(e.message, 'error')), 250); };
 
-window.__wizardCloseOverlay = () => {
-  if (menuKey) { closeMenu(); return true; }
-  if (popT) { closePop(); return true; }
-  if (!el('msheet').hidden) { closeManual(); return true; }
-  if (!el('t-picker').hidden) { closePicker(); return true; }
-  if (!el('sheet').hidden) { closeSheet(); return true; }
-  return false;
-};
+/* Back: wizard-sheet.js (loaded after this file) closes the open sheet first, then falls back to this. */
+window.__wizardCloseOverlay = () => false;
 if (!hosted) {
   history.pushState({ wzGuard: 1 }, '', location.href);
   addEventListener('popstate', () => { window.__wizardCloseOverlay(); history.pushState({ wzGuard: 1 }, '', location.href); });
 }
-addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (menuKey) { closeMenu(); return; } if (popT) { closePop(); return; } if (!el('t-picker').hidden) { closePicker(); return; } closeManual(); closeSheet(); } });
 showTab(); refresh();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
