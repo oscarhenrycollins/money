@@ -138,25 +138,20 @@ async function loadList() {
   await get(query(), (r, stale) => { if (seq === listSeq) paintList(r, stale); });
 }
 /* ---------- visual cues ---------- */
-const PALETTE = ['#7c6cf2', '#e0699a', '#3fb6a8', '#e8a23b', '#5a9cf0', '#d9734e', '#8bc34a', '#b07be0', '#4db6d6', '#e05d5d'];
-const hash = (x) => { let n = 0; for (const ch of String(x || '')) n = (n * 31 + ch.charCodeAt(0)) >>> 0; return n; };
+/* Colours are kit variables only (tests/no-hex.sh): neutral by default, semantic roles where they carry meaning. */
+const POS = 'var(--pos)', WARN = 'var(--warn)';
 function avatar(name) {
   const clean = String(name || '?').replace(/[^\p{L}\p{N} ]/gu, ' ').trim();
   const w = clean.split(/\s+/).filter(Boolean);
   const ini = ((w[0]?.[0] || '?') + (w.length > 1 ? w[1][0] : (w[0]?.[1] || ''))).toUpperCase();
-  const a = h('span', 'mn-av', ini); a.style.setProperty('--c', PALETTE[hash(clean.toLowerCase()) % PALETTE.length]); a.setAttribute('aria-hidden', 'true');
+  const a = h('span', 'mn-av', ini); a.setAttribute('aria-hidden', 'true');
   return a;
 }
-const BANKS = [[/chase|sapphire/i, '#1a5fb4', '#0d3a75'], [/amex|american express|platinum card/i, '#c9ced6', '#7d8590', 1], [/morgan/i, '#163a6b', '#0a1f3d'],
-  [/usaa/i, '#24456e', '#102540'], [/hilton/i, '#2a6fd6', '#123f86'], [/capital one|venture|savor/i, '#d03027', '#7d1712'], [/citi/i, '#0b7bc1', '#054a75'],
-  [/bank of america|boa/i, '#e31837', '#8d0e22'], [/wells/i, '#d71e28', '#8a1218'], [/discover/i, '#ff7a1a', '#b34d00'], [/schwab/i, '#00a0df', '#006690'],
-  [/fidelity/i, '#4aa564', '#2a6a3b'], [/apple/i, '#e9e9ee', '#9a9aa5', 1], [/wise/i, '#9fe870', '#4e9a2a', 1]];
+/* Card art: a neutral tile with the last four digits; the account name sits beside it (no brand colours). */
 function card(t) {
   const txt = `${t.institution || ''} ${t.account_name || ''}`;
-  const m = BANKS.find(([re]) => re.test(txt));
-  const c1 = m ? m[1] : PALETTE[hash(txt) % PALETTE.length], c2 = m ? m[2] : 'rgba(0,0,0,.35)';
   const l4 = t.last_four || (String(t.account_name || '').match(/(\d{4})\)?\s*$/) || [])[1] || '';
-  const chip = h('span', 'mn-card' + (m && m[3] ? ' light' : '')); chip.style.background = `linear-gradient(135deg, ${c1}, ${c2})`;
+  const chip = h('span', 'mn-card'); chip.title = txt.trim();
   chip.append(h('i'), h('b', '', l4 ? l4.slice(-4) : '••'));
   return chip;
 }
@@ -179,21 +174,21 @@ const IC = {
   scale: 'M12 3v18 M5 21h14 M4 7h16 M7 7l-3 6a3 3 0 0 0 6 0z M17 7l-3 6a3 3 0 0 0 6 0z', back: 'M9 14l-5-5 5-5 M4 9h11a5 5 0 0 1 0 10h-3',
   shield: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z', scooter: 'M5 18h.01 M19 18h.01 M5 18h10l3-10h3 M14 8h4', tag: 'M3 3h8l10 10-8 8L3 11z M7.5 7.5h.01',
   heart: 'M12 21s-8-5-8-11a4 4 0 0 1 8-2 4 4 0 0 1 8 2c0 6-8 11-8 11z' };
-const CAT_ICONS = [[/uncategor/i, 'warn', '#e8a23b'], [/va |military/i, 'medal', '#3fb6a8'], [/income|salary|payroll|revenue/i, 'brief', '#4caf7a'],
-  [/interest|dividend|invest/i, 'chart', '#4caf7a'], [/gift|charity|donat/i, 'gift', '#e0699a'], [/gas & elec|electric|utilit|water|garbage/i, 'bulb', '#e8c13b'],
-  [/^gas|fuel/i, 'fuel', '#d9734e'], [/parking|toll/i, 'car', '#8b93a7'], [/auto|car\b|rental car/i, 'car', '#5a9cf0'], [/transit|train|bus/i, 'train', '#5a9cf0'],
-  [/taxi|ride|grab|bolt|uber/i, 'taxi', '#e8c13b'], [/scooter/i, 'scooter', '#4db6d6'], [/mortgage|rent|home/i, 'home', '#b07be0'],
-  [/internet|cable|phone/i, 'phone', '#4db6d6'], [/ai usage/i, 'bot', '#7c6cf2'], [/subscri|software|saas/i, 'repeat', '#7c6cf2'], [/grocer/i, 'cart', '#8bc34a'],
-  [/coffee/i, 'cup', '#b5835a'], [/restaurant|dining|bar|lineman|food|lpth/i, 'fork', '#e8865a'], [/hotel|lodging/i, 'bed', '#5ab0e8'],
-  [/travel|vacation|flight|air/i, 'plane', '#5ab0e8'], [/shop|tiktok|amazon|cloth/i, 'bag', '#e0699a'], [/health|medical|pharm|doctor|dental/i, 'health', '#e05d5d'],
-  [/fitness|gym|sport/i, 'heart', '#e05d5d'], [/entertain|movie|music|game/i, 'film', '#b07be0'], [/fee|financial|bank charge/i, 'receipt', '#8b93a7'],
-  [/transfer/i, 'swap', '#8b93a7'], [/card payment|credit card|payment/i, 'card', '#8b93a7'], [/advertis|promot|marketing/i, 'mega', '#e8865a'],
-  [/tax/i, 'bank', '#8b93a7'], [/educat|course|book/i, 'cap', '#5a9cf0'], [/pet/i, 'paw', '#b5835a'], [/balance|adjust/i, 'scale', '#8b93a7'],
-  [/business|office|work|biz/i, 'brief', '#5a9cf0'], [/refund|credit/i, 'back', '#4caf7a'], [/insur/i, 'shield', '#3fb6a8']];
+const CAT_ICONS = [[/uncategor/i, 'warn', WARN], [/va |military/i, 'medal', null], [/income|salary|payroll|revenue/i, 'brief', POS],
+  [/interest|dividend|invest/i, 'chart', POS], [/gift|charity|donat/i, 'gift', null], [/gas & elec|electric|utilit|water|garbage/i, 'bulb', null],
+  [/^gas|fuel/i, 'fuel', null], [/parking|toll/i, 'car', null], [/auto|car\b|rental car/i, 'car', null], [/transit|train|bus/i, 'train', null],
+  [/taxi|ride|grab|bolt|uber/i, 'taxi', null], [/scooter/i, 'scooter', null], [/mortgage|rent|home/i, 'home', null],
+  [/internet|cable|phone/i, 'phone', null], [/ai usage/i, 'bot', null], [/subscri|software|saas/i, 'repeat', null], [/grocer/i, 'cart', null],
+  [/coffee/i, 'cup', null], [/restaurant|dining|bar|lineman|food|lpth/i, 'fork', null], [/hotel|lodging/i, 'bed', null],
+  [/travel|vacation|flight|air/i, 'plane', null], [/shop|tiktok|amazon|cloth/i, 'bag', null], [/health|medical|pharm|doctor|dental/i, 'health', null],
+  [/fitness|gym|sport/i, 'heart', null], [/entertain|movie|music|game/i, 'film', null], [/fee|financial|bank charge/i, 'receipt', null],
+  [/transfer/i, 'swap', null], [/card payment|credit card|payment/i, 'card', null], [/advertis|promot|marketing/i, 'mega', null],
+  [/tax/i, 'bank', null], [/educat|course|book/i, 'cap', null], [/pet/i, 'paw', null], [/balance|adjust/i, 'scale', null],
+  [/business|office|work|biz/i, 'brief', null], [/refund|credit/i, 'back', POS], [/insur/i, 'shield', null]];
 function catIcon(c) {
   const m = CAT_ICONS.find(([re]) => re.test(c || 'Uncategorized'));
-  const name = m ? m[1] : 'tag', col = m ? m[2] : PALETTE[hash(c) % PALETTE.length];
-  const e = h('em', 'mn-ci'); e.style.setProperty('--ic', col);
+  const name = m ? m[1] : 'tag', col = m ? m[2] : null;
+  const e = h('em', 'mn-ci'); if (col) e.style.setProperty('--ic', col);
   e.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${IC[name]}"/></svg>`;
   return e;
 }
@@ -483,7 +478,6 @@ async function loadSpending() {
   const m = month;
   await Promise.all([get('api/spending?month=' + m, (s) => paintSpending(s)), get('api/spending?month=' + prevMonth(m), () => { if (cache['api/spending?month=' + m]) paintSpending(cache['api/spending?month=' + m]); })]);
 }
-const catColor = (c) => { const m = CAT_ICONS.find(([re]) => re.test(c || 'Uncategorized')); return m ? m[2] : PALETTE[hash(c) % PALETTE.length]; };
 function donut(parts, total, center) {
   const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg');
   svg.setAttribute('viewBox', '0 0 120 120'); svg.setAttribute('class', 'mn-donut'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', 'Spending by category');
@@ -492,7 +486,7 @@ function donut(parts, total, center) {
   for (const [v, col] of parts) {
     const len = Math.max(0, v / total * C); if (len < 0.4) continue;
     const c = document.createElementNS(NS, 'circle'); c.setAttribute('cx', 60); c.setAttribute('cy', 60); c.setAttribute('r', R);
-    c.setAttribute('stroke', col); c.setAttribute('stroke-dasharray', `${Math.max(0, len - 1.2)} ${C}`); c.setAttribute('stroke-dashoffset', -off);
+    c.style.stroke = col; c.setAttribute('stroke-dasharray', `${Math.max(0, len - 1.2)} ${C}`); c.setAttribute('stroke-dashoffset', -off);
     c.setAttribute('class', 'mn-donut-seg'); svg.append(c); off += len;
   }
   const wrap = h('div', 'mn-donut-w'); wrap.append(svg);
@@ -515,15 +509,18 @@ function paintSpending(s) {
     tile('Per day', money(s.spent / Math.max(1, days)), ''));
   const cats = s.categories.filter((c) => c.amount > 0), total = cats.reduce((x, c) => x + c.amount, 0) || 1;
   const top = cats.slice(0, 8), rest = cats.slice(8).reduce((x, c) => x + c.amount, 0);
-  const RANK = ['#8b7cf6', '#ef6f9a', '#3fc1b0', '#f2a93b', '#5aa6f5', '#e8745a', '#9ccc5a', '#c48ae8'];
+  /* Top categories: one accent ramp (accent, accent toward ink, accent tints, inks) so every skin keeps the slices apart. */
+  const mix = (p, w) => `color-mix(in srgb, var(--accent) ${p}%, ${w})`;
+  const RANK = ['var(--accent)', mix(55, 'var(--ink)'), 'var(--ink-2)', mix(58, 'transparent'), mix(25, 'var(--ink)'), 'var(--ink-3)', mix(32, 'transparent'), 'color-mix(in srgb, var(--ink) 30%, transparent)'];
+  const REST = 'var(--line-2)';
   const colOf = {}; top.forEach((c, i) => { colOf[c.category] = RANK[i]; });
-  const parts = top.map((c) => [c.amount, colOf[c.category]]); if (rest > 0) parts.push([rest, '#5b5f6e']);
+  const parts = top.map((c) => [c.amount, colOf[c.category]]); if (rest > 0) parts.push([rest, REST]);
   const chart = el('sp-chart'); chart.replaceChildren();
   if (cats.length) {
     chart.append(donut(parts, total, ['Spent', money(s.spent)]));
     const leg = h('ul', 'mn-legend');
     for (const c of top) { const li = h('li'); const dot = h('i'); dot.style.background = colOf[c.category]; li.append(dot, h('span', '', c.category), h('b', '', Math.round(c.amount / total * 100) + '%')); leg.append(li); }
-    if (rest > 0) { const li = h('li'); const dot = h('i'); dot.style.background = '#5b5f6e'; li.append(dot, h('span', '', `${cats.length - 8} more`), h('b', '', Math.round(rest / total * 100) + '%')); leg.append(li); }
+    if (rest > 0) { const li = h('li'); const dot = h('i'); dot.style.background = REST; li.append(dot, h('span', '', `${cats.length - 8} more`), h('b', '', Math.round(rest / total * 100) + '%')); leg.append(li); }
     chart.append(leg);
   }
   const prevBy = Object.fromEntries((prev?.categories || []).map((c) => [c.category, c.amount]));
@@ -539,7 +536,7 @@ function paintSpending(s) {
     t.append(tr, h('small', 'mn-pct', c.amount > 0 ? pct.toFixed(pct < 1 ? 1 : 0) + '%' : 'refund'), h('b', 'mn-camt' + (c.amount < 0 ? ' pos' : ''), money(c.amount)));
     const bar = h('div', 'mn-bar-bg'); const fill = h('div', 'mn-bar-fill'); fill.style.width = Math.max(c.amount > 0 ? 1.5 : 0, c.amount / maxAmt * 100) + '%';  bar.append(fill);
     body.append(t, bar);
-    const ic = catIcon(c.category); const cc = colOf[c.category] || '#7d8296'; ic.style.setProperty('--ic', cc); fill.style.background = cc;
+    const ic = catIcon(c.category); const cc = colOf[c.category] || 'var(--ink-3)'; ic.style.setProperty('--ic', cc); fill.style.background = cc;
     li.append(ic, body, h('span', 'mn-chev', '›'));
     const go = () => { tab = 'review'; f = { ...DEF, show: 'all', sort: 'largest', category: c.category, when: month }; saveF(); el('search').value = ''; showTab(); renderFilterChips(); loadList().catch((e) => say(e.message, 'error')); };
     li.onclick = go; li.onkeydown = (e) => { if (e.key === 'Enter') go(); };
@@ -553,7 +550,7 @@ let nwRange = 'ytd', nwData = null;
 const TAG = { bank: 'bank', manual: 'manual', import: 'import' };
 async function loadNetWorth() { await get('api/networth', paintNetWorth); }
 function acctIcon(a) {
-  if (a.origin === 'manual') { const e = h('span', 'mn-av mn-btc', a.detail && /BTC/.test(a.detail) ? '₿' : '$'); e.style.setProperty('--c', a.detail && /BTC/.test(a.detail) ? '#f39b2a' : '#4caf7a'); return e; }
+  if (a.origin === 'manual') { const e = h('span', 'mn-av mn-btc', a.detail && /BTC/.test(a.detail) ? '₿' : '$'); if (!(a.detail && /BTC/.test(a.detail))) e.style.setProperty('--c', POS); return e; }
   return card({ institution: a.institution, account_name: a.name, last_four: a.last_four });
 }
 function paintNetWorth(data) {
