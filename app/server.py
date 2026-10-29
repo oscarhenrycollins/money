@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.10.0'
+VERSION = '0.10.1'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -341,13 +341,22 @@ def _apply_rules(t, rules):
 
 
 HINT_DAYS = int(os.environ.get('MONEY_HINT_DAYS', '120'))
+# Borrowing Monarch's category picks is off: Money stands on its live connection alone (the owner's choice).
+MONARCH_HINTS = os.environ.get('MONEY_MONARCH_HINTS', '0') == '1'
 
 
 def refresh_hints(live):
     """Running beside Monarch: keep a copy of Monarch's categories for recent transactions, matched later by
     card, amount and date. Best effort, never fails a sync; costs no Monarch quota (reads the connector's copy)."""
     base = dict(SOURCES).get('wizard-monarch')
-    if not base or live == 'wizard-monarch':
+    if not MONARCH_HINTS or not base or live == 'wizard-monarch':
+        with LOCK:   # off: Money's categories come only from the owner, his rules, his history and the live bank
+            c = db()
+            try:
+                with c:
+                    c.execute('DELETE FROM hints')
+            finally:
+                c.close()
         return 0
     try:
         rows = _fetch_all(base, (dt.date.today() - dt.timedelta(days=HINT_DAYS)).isoformat())
