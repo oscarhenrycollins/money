@@ -16,6 +16,8 @@ The owner's money app at /money/. It reads one bank-connection app (SimpleFIN by
 
 Read: `money_overview` (current connection, `attention` = banks that stopped updating or need reconnecting and where to fix them (mention these first, and treat those banks' numbers as out of date), accounts, how many need review, categories, rules), `money_transactions` (his categories and names applied; filters from/to, account, search, category, reviewed, amounts, direction out/in; min_abs; sort newest, oldest, largest = biggest in or out first, smallest, merchant/account/category A–Z or *_desc; each answer has a summary of money out/in and uncategorized count), `money_spending` (one month by category; refunds net, transfers and card payments excluded).
 
+Every transaction comes back with `category_from`: `you` (his pick), `rule`, `bank`, `monarch` (Monarch's pick for the same card, amount and date while Monarch runs alongside), `payment` (card payment/autopay, excluded from spending) or `memory` (what he called this merchant before). Treat `memory` as a good guess he may want to confirm.
+
 Change only when he asks: `money_update` with `source` and `id` (or `ids`). Setting `make_rule` with `match` text also categorizes future matching transactions. The app has an Undo for the last change; edits never alter the bank's data.
 
 Negative amounts are money out. For card-benefit credits, search the transaction and report it as "looks posted"; he confirms in Card Benefits.
