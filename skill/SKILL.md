@@ -18,6 +18,8 @@ Read: `money_overview` (current connection, `attention` = banks that stopped upd
 
 Every transaction comes back with `category_from`: `you` (his pick), `rule`, `bank`, `monarch` (Monarch's pick for the same card, amount and date while Monarch runs alongside), `payment` (card payment/autopay, excluded from spending) or `memory` (what he called this merchant before). Treat `memory` as a good guess he may want to confirm.
 
-Change only when he asks: `money_update` with `source` and `id` (or `ids`). Setting `make_rule` with `match` text also categorizes future matching transactions. The app has an Undo for the last change; edits never alter the bank's data.
+`money_overview.free_check` pairs Free-category charges (card-benefit buys) with their statement credits; `waiting_for_credit` is still real spending until the credit posts. Imported history keeps the category he gave it in the old app over rules.
+
+Change only when he asks: `money_update` with `source` and `id` (or `ids`). Setting `make_rule` with `match` text also categorizes future matching transactions. `money_rules` adds rules with optional size (min_abs/max_abs) and day-of-month ('24-5') conditions or deletes rules; the most specific matching rule wins. `money_categories` adds, sets kind (expense/income/transfer), merges or deletes (unused only) categories. All of this lives in Money only; Monarch is never changed. The app has an Undo for the last change; edits never alter the bank's data.
 
 Negative amounts are money out. For card-benefit credits, search the transaction and report it as "looks posted"; he confirms in Card Benefits.
