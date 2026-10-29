@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.9.0'
+VERSION = '0.9.1'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -86,9 +86,11 @@ def db():
       CREATE TABLE IF NOT EXISTS hints (id TEXT PRIMARY KEY, akey TEXT, date TEXT, amount REAL, merchant TEXT,
         category TEXT, seen TEXT);
     ''')
+    if 'kind' not in {r[1] for r in c.execute('PRAGMA table_info(categories)')}:
+        c.execute('ALTER TABLE categories ADD COLUMN kind TEXT')   # expense | income | transfer (None = guess by name)
     if not c.execute('SELECT 1 FROM categories LIMIT 1').fetchone():
         with c:
-            c.executemany('INSERT INTO categories VALUES (?,?)', [(n, i) for i, n in enumerate(CATEGORIES)])
+            c.executemany('INSERT INTO categories(name,pos) VALUES (?,?)', [(n, i) for i, n in enumerate(CATEGORIES)])
     os.chmod(DATA / 'money.sqlite3', 0o600)
     return c
 
@@ -327,12 +329,20 @@ def refresh_hints(live):
         rows = _fetch_all(base, (dt.date.today() - dt.timedelta(days=HINT_DAYS)).isoformat())
     except Problem:
         return 0
+    try:   # Monarch's category groups say which categories are income or money moving between his own accounts
+        groups = ((_get(base, '/api/snapshot', {'kind': 'categories'}).get('data') or {}).get('category_groups') or [])
+    except Problem:
+        groups = []
     now = _now()
     n = 0
     with LOCK:
         c = db()
         try:
             with c:
+                for g in groups:   # fills only kinds not set yet: once Monarch is gone, Money keeps what it learned
+                    if g.get('type') in ('income', 'expense', 'transfer'):
+                        for cat in g.get('categories') or []:
+                            c.execute('UPDATE categories SET kind=? WHERE name=? AND kind IS NULL', (g['type'], cat.get('name')))
                 for t in rows.values():
                     k = _key(t.get('institution'), t.get('account_name'), t.get('last_four'))
                     if not k or not t.get('category') or t.get('amount') is None:
@@ -598,9 +608,14 @@ def transactions(args, c=None):
             rows.sort(key=lambda r: (r['amount'] if r['amount'] is not None else 0, r['date'] or ''))
         elif args.get('sort') == 'income':   # biggest money in first
             rows.sort(key=lambda r: -(r['amount'] if r['amount'] is not None else 0))
+        # Money out/in leave out money moving between his own accounts (card payments, transfers), so a card
+        # charge and the autopay that settles it are not counted twice. Filtering to one category counts it all.
+        kinds = _kinds(c)
+        real = rows if args.get('category') else [r for r in rows if kinds.get((r['category'] or '').lower()) != 'transfer']
         out = {'count': len(rows[:limit]), 'total': len(rows), 'transactions': rows[:limit],
-               'summary': {'out': round(sum(r['amount'] for r in rows if (r['amount'] or 0) < 0), 2),
-                           'in': round(sum(r['amount'] for r in rows if (r['amount'] or 0) > 0), 2),
+               'summary': {'out': round(sum(r['amount'] for r in real if (r['amount'] or 0) < 0), 2),
+                           'in': round(sum(r['amount'] for r in real if (r['amount'] or 0) > 0), 2),
+                           'transfers': len(rows) - len(real),
                            'uncategorized': sum(1 for r in rows if not r['category'])}}
         if args.get('all') is True:
             out['rows'] = rows
@@ -624,7 +639,7 @@ def update(body):
         try:
             with c:
                 if 'category' in fields and fields['category'] and not c.execute('SELECT 1 FROM categories WHERE name=?', (fields['category'],)).fetchone():
-                    c.execute('INSERT INTO categories VALUES (?, (SELECT COALESCE(MAX(pos),0)+1 FROM categories))', (fields['category'],))
+                    c.execute('INSERT INTO categories(name,pos) VALUES (?, (SELECT COALESCE(MAX(pos),0)+1 FROM categories))', (fields['category'],))
                 for i in ids[:500]:
                     i = str(i)
                     if not c.execute('SELECT 1 FROM tx WHERE source=? AND id=?', (src, i)).fetchone():
@@ -698,7 +713,7 @@ def import_setup(body):
                         c.execute('DELETE FROM categories')
                     start = c.execute('SELECT COALESCE(MAX(pos),-1)+1 FROM categories').fetchone()[0]
                     for i, n in enumerate(names):
-                        c.execute('INSERT OR IGNORE INTO categories VALUES (?,?)', (n, start + i))
+                        c.execute('INSERT OR IGNORE INTO categories(name,pos) VALUES (?,?)', (n, start + i))
                 for r in rules or []:
                     if not isinstance(r, dict):
                         continue
@@ -708,7 +723,7 @@ def import_setup(body):
                     c.execute('DELETE FROM rules WHERE lower(match)=lower(?)', (match,))
                     c.execute('INSERT INTO rules(match,category,merchant,created) VALUES (?,?,?,?)',
                               (match, cat, (str(r['merchant']).strip()[:60] or None) if r.get('merchant') else None, _now()))
-                    c.execute('INSERT OR IGNORE INTO categories VALUES (?, (SELECT COALESCE(MAX(pos),0)+1 FROM categories))', (cat,))
+                    c.execute('INSERT OR IGNORE INTO categories(name,pos) VALUES (?, (SELECT COALESCE(MAX(pos),0)+1 FROM categories))', (cat,))
                     added += 1
         finally:
             c.close()
@@ -935,17 +950,32 @@ def _month_bounds(month):
 
 
 SKIP = {'transfer', 'card payment', 'credit card payment'}
+INCOME = {'income', 'business income', 'other income', 'va income', 'military income', 'interest', 'paychecks'}
+
+
+def _kinds(c):
+    """Category -> expense / income / transfer. His setting (or Monarch's group) wins; otherwise guess by name."""
+    out = {}
+    for name, kind in c.execute('SELECT name, kind FROM categories'):
+        out[name.lower()] = kind or ('transfer' if name.lower() in SKIP else 'income' if name.lower() in INCOME else 'expense')
+    return out
 
 
 def spending(month=None):
     start, end, label = _month_bounds(month)
     rows = transactions({'from': start, 'to': end, 'limit': 2000})['transactions']
+    c = db()
+    try:
+        kinds = _kinds(c)
+    finally:
+        c.close()
     cats, income, spent = {}, 0.0, 0.0
     for t in rows:
         cat = t['category'] or 'Uncategorized'
-        if cat.lower() in SKIP or t['amount'] is None:
+        kind = kinds.get(cat.lower()) or ('transfer' if cat.lower() in SKIP else 'income' if cat.lower() in INCOME else 'expense')
+        if kind == 'transfer' or t['amount'] is None:
             continue
-        if t['amount'] > 0 and cat.lower() in ('income', 'business income', 'other income', 'va income'):
+        if t['amount'] > 0 and kind == 'income':
             income += t['amount']
             continue
         cats[cat] = cats.get(cat, 0) - t['amount']   # refunds and credits net against spending
@@ -1025,7 +1055,7 @@ def overview():
         out = {'source': src, 'source_name': NAMES.get(src, src), 'sources': srcs, 'chosen': bool(_setting(c, 'source')),
                'accounts': accts, 'hidden_accounts': hidden_accts, 'manual': manual_accounts(c), 'history': hist,
                'to_review': sum(1 for r in allrows if not r['reviewed']), 'transactions': len(allrows),
-               'categories': cats, 'rules': _rules(c),
+               'categories': cats, 'category_kinds': _kinds(c), 'rules': _rules(c),
                'last_sync': _setting(c, 'last_sync'), 'error': _setting(c, 'last_error'), 'syncing': SYNCING.is_set(),
                'attention': attention(c, src, allaccts, accts)}
     finally:
