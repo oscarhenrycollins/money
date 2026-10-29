@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.10.1'
+VERSION = '0.11.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -414,6 +414,7 @@ def _memory(c):
         k = ' '.join(_strip(_norm(name).split()))
         if not cat or len(k) < 4 or k in STOP:
             return
+        k = k.replace(' ', '')   # 'Event Pop' and 'Eventpop' are the same merchant
         votes.setdefault(k, {}).setdefault(cat, 0)
         votes[k][cat] += 1
     for r in c.execute('''SELECT t.source, t.merchant, t.description, t.source_category, e.category FROM tx t
@@ -439,10 +440,86 @@ def _remember(t, memory):
         words = _strip(_norm(text).split())
         for start in range(min(2, len(words))):
             for end in range(min(len(words), start + 5), start, -1):
-                k = ' '.join(words[start:end])
-                if k in memory:
+                k = ''.join(words[start:end])
+                if len(k) >= 4 and k in memory:
                     return memory[k]
     return None
+
+
+# Common knowledge every owner gets: well-known merchants and plain words -> a kind of spending, mapped onto the
+# owner's own category names (first one he has wins). Lowest priority: his picks, rules and history always win.
+KINDS = {
+    'groceries': ['Groceries'], 'restaurants': ['Restaurants & Bars', 'Restaurants'], 'coffee': ['Coffee Shops', 'Coffee'],
+    'shopping': ['Shopping'], 'clothing': ['Clothing', 'Shopping'], 'electronics': ['Electronics', 'Shopping'],
+    'home': ['Furniture & Housewares', 'Home Improvement', 'Shopping'], 'personal': ['Personal', 'Health'],
+    'medical': ['Medical', 'Health'], 'dentist': ['Dentist', 'Medical', 'Health'], 'fitness': ['Fitness', 'Health'],
+    'rides': ['Taxi & Ride Shares', 'Rides & Taxis'], 'transit': ['Public Transit', 'Rides & Taxis'], 'gas': ['Gas'],
+    'parking': ['Parking & Tolls'], 'flights': ['Travel & Vacation', 'Flights', 'Travel'],
+    'hotels': ['Travel & Vacation', 'Hotels', 'Travel'], 'travel': ['Travel & Vacation', 'Travel'],
+    'entertainment': ['Entertainment & Recreation', 'Entertainment'], 'subscriptions': ['Subscriptions'],
+    'phone': ['Phone', 'Phone & Internet'], 'internet': ['Internet & Cable', 'Phone & Internet'],
+    'utilities': ['Gas & Electric', 'Utilities'], 'pets': ['Pets'], 'cash': ['Cash & ATM'],
+    'fees': ['Financial Fees', 'Fees'], 'interest': ['Interest', 'Income'], 'shipping': ['Postage & Shipping'],
+    'insurance': ['Insurance'], 'taxes': ['Taxes'], 'education': ['Education'], 'charity': ['Charity', 'Gifts'],
+}
+COMMON = {
+    'groceries': 'tops|big c|lotus s|lotuss|makro|villa market|foodland|gourmet market|max valu|7 eleven|7 11|familymart|family mart|'
+                 'lawson|cj express|whole foods|trader joe s|trader joes|safeway|kroger|publix|aldi|costco|walmart grocery|'
+                 'supermarket|grocery|deli mart|minimart|mini mart',
+    'coffee': 'starbucks|cafe amazon|dunkin|tim hortons|blue bottle|coffee|cafe|caffe|roaster|roasters|espresso|bakery',
+    'restaurants': 'mcdonald s|mcdonalds|kfc|burger king|subway|pizza|domino s|dominos|swensen s|sizzler|mk restaurant|'
+                   'after you|hai di lao|haidilao|shabushi|bonchon|chipotle|wendy s|taco bell|restaurant|bistro|kitchen|'
+                   'grill|bar b q|bbq|sushi|ramen|noodle|steak|izakaya|brasserie|eatery|diner|food court|take home|gourmet eats',
+    'clothing': 'h m|uniqlo|zara|gap|nike|adidas|lululemon|decathlon|victoria s secret|victorias secret|victoria secret|'
+                'old navy|forever 21|pull bear|cotton on|foot locker',
+    'electronics': 'apple store|power buy|banana it|best buy|mi shop|xiaomi|samsung store',
+    'home': 'ikea|homepro|home pro|nitori|index living|home depot|lowe s|lowes|bed bath',
+    'shopping': 'miniso|daiso|muji|department store|'
+                'lazada|shopee|amazon|amzn|aliexpress|temu|target|walmart|ebay|etsy|sephora|jung saem mool|duty free|king power',
+    'personal': 'watsons|boots|eveandboy|salon|barber|spa|massage|nail',
+    'medical': 'hospital|clinic|pharmacy|cvs|walgreens|bumrungrad|samitivej|bnh|medical|doctor',
+    'dentist': 'dental|dentist|orthodont',
+    'fitness': 'gym|fitness|jetts|virgin active|anytime fitness|yoga|pilates|crossfit|muay thai',
+    'rides': 'uber|lyft|bolt|taxi|cabify|kakao mobility|indrive',
+    'transit': 'bts|mrt|airport rail link|korail|metro|subway fare|train|amtrak|greyhound|ferry|bus',
+    'gas': 'shell|ptt|chevron|esso|exxon|mobil|bangchak|caltex|bp|petrol|fuel|gas station',
+    'parking': 'parking|parkwhiz|spothero|toll|easy park',
+    'flights': 'airlines|airways|airasia|air asia|thai airways|bangkok airways|nok air|vietjet|cathay|singapore airlines|'
+               'emirates|qatar airways|united airlines|delta air|american airlines|jetblue|southwest|korean air|eva air|'
+               'ana|jal|lufthansa|klm|air france|ryanair|easyjet|teaflight',
+    'hotels': 'marriott|hilton|hyatt|ihg|holiday inn|accor|sofitel|novotel|sheraton|westin|w hotel|four seasons|'
+              'kempinski|hotel|resort|hostel|inns',
+    'travel': 'airbnb|booking com|agoda|expedia|trip com|traveloka|hotels com|klook|kkday|makemytrip|gotogate',
+    'entertainment': 'event pop|eventpop|ticketmelon|megatix|ticketmaster|eventbrite|sf cinema|major cineplex|cinema|'
+                     'imax|theatre|theater|concert|museum|steam|playstation|nintendo|xbox|bowling|karaoke|club',
+    'subscriptions': 'netflix|spotify|disney|hbo|youtube premium|apple com bill|google one|icloud|dropbox|notion|'
+                     'canva|adobe|microsoft|github|slack|figma|chatgpt|patreon|substack|medium|audible|kindle unlimited',
+    'phone': 'ais|dtac|true move|truemove|airalo|t mobile|verizon|at t|mint mobile|google fi|holafly|esim',
+    'internet': 'comcast|xfinity|spectrum|3bb|true online|ais fibre',
+    'utilities': 'electric|electricity|mea|pea|water authority|pg e|con ed',
+    'pets': 'pet|vet|veterinary|animal hospital|petco|petsmart',
+    'cash': 'atm|cash withdrawal|withdrawal',
+    'fees': 'annual fee|membership fee|late fee|foreign transaction fee|interest charge|overdraft|service charge',
+    'interest': 'interest paid|interest payment|dividend',
+    'shipping': 'lalamove|fedex|dhl|ups|usps|kerry express|flash express|thailand post|post office',
+    'insurance': 'insurance|geico|progressive|state farm|allianz|axa',
+    'taxes': 'irs|internal revenue|tax payment|franchise tax',
+    'education': 'udemy|coursera|tuition|school|university|course',
+    'charity': 'donation|charity|red cross|unicef',
+}
+_COMMON = sorted(((' ' + _norm(w) + ' ', kind) for kind, words in COMMON.items() for w in words.split('|') if _norm(w)),
+                 key=lambda x: -len(x[0]))
+
+
+def _common(t, names):
+    """The kind of merchant anyone would know, as one of his categories (None if he has no fitting category)."""
+    text = ' ' + ' '.join(_strip(_norm(f"{t.get('description') or ''} {t.get('merchant') or ''}").split())) + ' '
+    best = None   # the merchant name comes first; later words are usually the mall or street it sits in
+    for pat, kind in _COMMON:
+        i = text.find(pat)
+        if i >= 0 and (best is None or i < best[0]):
+            best = (i, kind)
+    return best and next((n for n in KINDS[best[1]] if n in names), None)
 
 
 def _context(c):
@@ -452,7 +529,7 @@ def _context(c):
     names = {r[0] for r in c.execute('SELECT name FROM categories')}
     pay = next((n for n in ('Credit Card Payment', 'Card Payment') if n in names), 'Credit Card Payment')
     merged = {k.lower(): v for k, v in (_setting(c, 'merged') or {}).items()}
-    return {'rules': _rules(c), 'memory': _memory(c), 'hints': hints, 'payment': pay, 'merged': merged}
+    return {'rules': _rules(c), 'memory': _memory(c), 'hints': hints, 'payment': pay, 'merged': merged, 'names': names}
 
 
 def _hint(t, hints):
@@ -492,6 +569,8 @@ def _view(row, ctx):
             cat, came = ctx['payment'], 'payment'
         if not cat:
             cat, came = _remember(t, ctx['memory']), 'memory'
+        if not cat:
+            cat, came = _common(t, ctx['names']), 'common'
     merged = ctx.get('merged') if isinstance(ctx, dict) else None
     if cat and merged:
         cat = merged.get(cat.lower(), cat)
