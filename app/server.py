@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.8.1'
+VERSION = '0.9.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -83,6 +83,8 @@ def db():
       CREATE TABLE IF NOT EXISTS networth (date TEXT PRIMARY KEY, value REAL, assets REAL, liabilities REAL, origin TEXT);
       CREATE TABLE IF NOT EXISTS manual (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, amount REAL,
         note TEXT, updated TEXT);
+      CREATE TABLE IF NOT EXISTS hints (id TEXT PRIMARY KEY, akey TEXT, date TEXT, amount REAL, merchant TEXT,
+        category TEXT, seen TEXT);
     ''')
     if not c.execute('SELECT 1 FROM categories LIMIT 1').fetchone():
         with c:
@@ -249,7 +251,8 @@ def sync(source=None):
                     _set(c, 'health', health)
             finally:
                 c.close()
-        return {'source': source, 'accounts': len(accts), 'transactions': len(rows)}
+        hints = refresh_hints(source)
+        return {'source': source, 'accounts': len(accts), 'transactions': len(rows), 'hints': hints}
     except Problem as e:
         c = db()
         try:
@@ -295,19 +298,156 @@ def _rules(c):
     return [dict(r) for r in c.execute('SELECT id,match,category,merchant FROM rules ORDER BY id')]
 
 
+def _norm(s):
+    """Lowercase words only: '7-11 SUKHUMVIT23*POINT2' -> '7 11 sukhumvit23 point2'."""
+    return ' '.join(re.findall(r"[a-z0-9]+", str(s or '').lower().replace("'", '')))
+
+
 def _apply_rules(t, rules):
-    text = f"{t.get('merchant') or ''} {t.get('description') or ''}".lower()
+    raw = f"{t.get('merchant') or ''} {t.get('description') or ''}"
+    text, ntext = raw.lower(), ' ' + _norm(raw) + ' '
     for r in rules:
-        if r['match'].lower() in text:
+        m = r['match'].lower()
+        nm = _norm(m)
+        if m in text or (len(nm) >= 3 and nm in ntext):
             return r
     return None
 
 
-def _view(row, rules):
+HINT_DAYS = int(os.environ.get('MONEY_HINT_DAYS', '120'))
+
+
+def refresh_hints(live):
+    """Running beside Monarch: keep a copy of Monarch's categories for recent transactions, matched later by
+    card, amount and date. Best effort, never fails a sync; costs no Monarch quota (reads the connector's copy)."""
+    base = dict(SOURCES).get('wizard-monarch')
+    if not base or live == 'wizard-monarch':
+        return 0
+    try:
+        rows = _fetch_all(base, (dt.date.today() - dt.timedelta(days=HINT_DAYS)).isoformat())
+    except Problem:
+        return 0
+    now = _now()
+    n = 0
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                for t in rows.values():
+                    k = _key(t.get('institution'), t.get('account_name'), t.get('last_four'))
+                    if not k or not t.get('category') or t.get('amount') is None:
+                        continue
+                    c.execute('INSERT OR REPLACE INTO hints VALUES (?,?,?,?,?,?,?)', (str(t['id']), json.dumps(k), t.get('date'),
+                              _num(t['amount']), t.get('counterparty') or t.get('description'), t['category'], now))
+                    n += 1
+                c.execute('DELETE FROM hints WHERE seen<>?', (now,))
+        finally:
+            c.close()
+    return n
+
+
+PAYMENT_RE = re.compile(r'autopay|automatic payment|payment\W+thank|thank you.*payment|online payment|mobile payment|'
+                        r'credit crd|crd epay|card pmt|epayment|payment received|ach pmt', re.I)
+# Words too common to identify a merchant by themselves.
+STOP = set('the and of at in co ltd inc llc com www pay payment online store shop market mart coffee cafe central world '
+           'terminal bangkok thailand sukhumvit thonglor asok branch bkk th us usa card credit bill purchase pos debit '
+           'service services international group company new food restaurant bar hotel'.split())
+# Payment processors that come before the real merchant ('WWW.2C2P.COM*LAZADA PAY', 'PwP Privacy.com').
+PROCESSORS = set('www com 2c2p pwp sq tst paypal pp omise ksher pf lm sp dna'.split())
+
+
+def _strip(words):
+    while words and (words[0] in PROCESSORS or words[0].isdigit()):
+        words = words[1:]
+    return words
+
+
+def _memory(c):
+    """What he called each merchant before: imported history (with his fixes), his own picks, and Monarch's recent
+    picks. Merchant words -> category, kept only where the past answer is clear (at least 2 in 3 agree)."""
+    votes = {}
+
+    def add(name, cat):
+        k = ' '.join(_strip(_norm(name).split()))
+        if not cat or len(k) < 4 or k in STOP:
+            return
+        votes.setdefault(k, {}).setdefault(cat, 0)
+        votes[k][cat] += 1
+    for r in c.execute('''SELECT t.source, t.merchant, t.description, t.source_category, e.category FROM tx t
+                          LEFT JOIN edits e ON e.source=t.source AND e.id=t.id'''):
+        cat = r['category'] or (r['source_category'] if r['source'] == 'import' else None)
+        if cat:
+            add(r['merchant'] or r['description'], cat)
+            if r['source'] != 'import' and r['description']:
+                add(_tidy(r['description']), cat)
+    for r in c.execute('SELECT merchant, category FROM hints'):
+        add(r['merchant'], r['category'])
+    out = {}
+    for k, cs in votes.items():
+        cat, n = max(cs.items(), key=lambda x: x[1])
+        if n * 3 >= sum(cs.values()) * 2:
+            out[k] = cat
+    return out
+
+
+def _remember(t, memory):
+    """Find a known merchant at the start of the bank's text (the merchant name nearly always comes first)."""
+    for text in (t.get('description'), t.get('merchant')):
+        words = _strip(_norm(text).split())
+        for start in range(min(2, len(words))):
+            for end in range(min(len(words), start + 5), start, -1):
+                k = ' '.join(words[start:end])
+                if k in memory:
+                    return memory[k]
+    return None
+
+
+def _context(c):
+    hints = {}
+    for r in c.execute('SELECT akey,date,amount,category FROM hints'):
+        hints.setdefault((tuple(json.loads(r['akey'])), round(r['amount'] or 0, 2)), []).append((r['date'], r['category']))
+    names = {r[0] for r in c.execute('SELECT name FROM categories')}
+    pay = next((n for n in ('Credit Card Payment', 'Card Payment') if n in names), 'Credit Card Payment')
+    return {'rules': _rules(c), 'memory': _memory(c), 'hints': hints, 'payment': pay}
+
+
+def _hint(t, hints):
+    k = _key(t.get('institution'), t.get('account_name'), t.get('last_four'))
+    best = None
+    for d, cat in hints.get((k, round(t.get('amount') or 0, 2)), []) if k else []:
+        gap = abs(_days_between(d, t.get('date')))
+        if gap <= 4 and (best is None or gap < best[0]):
+            best = (gap, cat)
+    return best and best[1]
+
+
+def _days_between(a, b):
+    try:
+        return (dt.date.fromisoformat(str(a)[:10]) - dt.date.fromisoformat(str(b)[:10])).days
+    except ValueError:
+        return 999
+
+
+def _view(row, ctx):
+    """His category wins, then his rules, then the bank's own category, then (beside Monarch) Monarch's pick for the
+    same card, amount and date, then card payments, then what he called this merchant before."""
     t = dict(row)
+    rules = ctx['rules'] if isinstance(ctx, dict) else ctx
     rule = _apply_rules(t, rules)
-    t['category'] = t.pop('e_category') or (rule and rule['category']) or t.get('source_category')
-    t['category_from'] = 'you' if row['e_category'] else 'rule' if rule else 'bank' if t.get('source_category') else None
+    cat, came = t.pop('e_category'), 'you'
+    if not cat and rule:
+        cat, came = rule['category'], 'rule'
+    if not cat and t.get('source_category'):
+        cat, came = t['source_category'], 'bank'
+    if not cat and isinstance(ctx, dict):
+        if row['source'] != 'import':
+            cat, came = _hint(t, ctx['hints']), 'monarch'
+        if not cat and PAYMENT_RE.search(t.get('description') or ''):
+            cat, came = ctx['payment'], 'payment'
+        if not cat:
+            cat, came = _remember(t, ctx['memory']), 'memory'
+    t['category'] = cat or None
+    t['category_from'] = came if cat else None
     t['merchant'] = t.pop('e_merchant') or (rule and rule['merchant']) or t.get('merchant') or _tidy(t.get('description'))
     t['reviewed'] = bool(t.pop('reviewed'))
     t['hidden'] = bool(t.pop('hidden'))
@@ -413,7 +553,7 @@ def transactions(args, c=None):
             q.append('AND t.amount > 0')
         limit = max(1, min(int(args.get('limit') or 200), 2000))
         q.append('ORDER BY t.date ASC, t.id ASC' if args.get('sort') == 'oldest' else 'ORDER BY t.date DESC, t.id DESC')
-        rules = _rules(c)
+        ctx = _context(c)
         starts, names, ex = _live_starts(c, src), _origin_names(c, src), _excluded(c)
         keep = set(_setting(c, 'import_keep') or [])
         live_amounts = {}
@@ -432,7 +572,7 @@ def transactions(args, c=None):
                 if k in starts and (r['date'] or '') >= starts[k]:
                     if r['id'] not in keep or (k, round(r['amount'] or 0, 2)) in live_amounts.get(r['date'], set()):
                         continue   # the live connection covers this account from here on: never show it twice
-            v = _view(r, rules)
+            v = _view(r, ctx)
             v['origin'] = 'import' if r['source'] == 'import' else 'bank'
             v['origin_name'] = names[v['origin']]
             rows.append(v)
