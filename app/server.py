@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.9.1'
+VERSION = '0.10.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -88,6 +88,10 @@ def db():
     ''')
     if 'kind' not in {r[1] for r in c.execute('PRAGMA table_info(categories)')}:
         c.execute('ALTER TABLE categories ADD COLUMN kind TEXT')   # expense | income | transfer (None = guess by name)
+    rcols = {r[1] for r in c.execute('PRAGMA table_info(rules)')}
+    for col in ('min_abs REAL', 'max_abs REAL', 'days TEXT'):   # optional conditions: size range, days of the month
+        if col.split()[0] not in rcols:
+            c.execute('ALTER TABLE rules ADD COLUMN ' + col)
     if not c.execute('SELECT 1 FROM categories LIMIT 1').fetchone():
         with c:
             c.executemany('INSERT INTO categories(name,pos) VALUES (?,?)', [(n, i) for i, n in enumerate(CATEGORIES)])
@@ -297,7 +301,17 @@ def _scheduler():
 # ---------------- the owner's layer ----------------
 
 def _rules(c):
-    return [dict(r) for r in c.execute('SELECT id,match,category,merchant FROM rules ORDER BY id')]
+    return [dict(r) for r in c.execute('SELECT id,match,category,merchant,min_abs,max_abs,days FROM rules ORDER BY id')]
+
+
+def _in_days(spec, date):
+    """'25-5' = from the 25th through the 5th of the next month; '1-10' = 1st to 10th."""
+    try:
+        a, b = (int(x) for x in str(spec).split('-'))
+        d = int(str(date)[8:10])
+    except (ValueError, TypeError):
+        return True
+    return a <= d <= b if a <= b else (d >= a or d <= b)
 
 
 def _norm(s):
@@ -306,14 +320,24 @@ def _norm(s):
 
 
 def _apply_rules(t, rules):
+    """The most specific matching rule wins: one with amount/day conditions, then the longest match text."""
     raw = f"{t.get('merchant') or ''} {t.get('description') or ''}"
     text, ntext = raw.lower(), ' ' + _norm(raw) + ' '
+    size = abs(t.get('amount') or 0)
+    best = None
     for r in rules:
         m = r['match'].lower()
         nm = _norm(m)
-        if m in text or (len(nm) >= 3 and nm in ntext):
-            return r
-    return None
+        if not (m in text or (len(nm) >= 3 and nm in ntext)):
+            continue
+        if r.get('min_abs') is not None and size < r['min_abs'] or r.get('max_abs') is not None and size > r['max_abs']:
+            continue
+        if r.get('days') and not _in_days(r['days'], t.get('date')):
+            continue
+        rank = (r.get('min_abs') is not None or r.get('max_abs') is not None or bool(r.get('days')), len(m))
+        if best is None or rank > best[0]:
+            best = (rank, r)
+    return best and best[1]
 
 
 HINT_DAYS = int(os.environ.get('MONEY_HINT_DAYS', '120'))
@@ -418,7 +442,8 @@ def _context(c):
         hints.setdefault((tuple(json.loads(r['akey'])), round(r['amount'] or 0, 2)), []).append((r['date'], r['category']))
     names = {r[0] for r in c.execute('SELECT name FROM categories')}
     pay = next((n for n in ('Credit Card Payment', 'Card Payment') if n in names), 'Credit Card Payment')
-    return {'rules': _rules(c), 'memory': _memory(c), 'hints': hints, 'payment': pay}
+    merged = {k.lower(): v for k, v in (_setting(c, 'merged') or {}).items()}
+    return {'rules': _rules(c), 'memory': _memory(c), 'hints': hints, 'payment': pay, 'merged': merged}
 
 
 def _hint(t, hints):
@@ -445,6 +470,8 @@ def _view(row, ctx):
     rules = ctx['rules'] if isinstance(ctx, dict) else ctx
     rule = _apply_rules(t, rules)
     cat, came = t.pop('e_category'), 'you'
+    if not cat and row['source'] == 'import' and t.get('source_category'):
+        cat, came = t['source_category'], 'bank'   # history he already reviewed in the old app beats rules
     if not cat and rule:
         cat, came = rule['category'], 'rule'
     if not cat and t.get('source_category'):
@@ -456,6 +483,9 @@ def _view(row, ctx):
             cat, came = ctx['payment'], 'payment'
         if not cat:
             cat, came = _remember(t, ctx['memory']), 'memory'
+    merged = ctx.get('merged') if isinstance(ctx, dict) else None
+    if cat and merged:
+        cat = merged.get(cat.lower(), cat)
     t['category'] = cat or None
     t['category_from'] = came if cat else None
     t['merchant'] = t.pop('e_merchant') or (rule and rule['merchant']) or t.get('merchant') or _tidy(t.get('description'))
@@ -679,6 +709,101 @@ def undo():
         finally:
             c.close()
     return {'ok': True, 'undone': len(batch)}
+
+
+def categories_change(body):
+    """merge (from -> into: every transaction, rule and future pick moves; from disappears), delete (unused only),
+    kind (expense / income / transfer), add."""
+    act, name = body.get('action'), str(body.get('name') or '').strip()[:60]
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                have = {r[0] for r in c.execute('SELECT name FROM categories')}
+                if act == 'add':
+                    if not name:
+                        raise Problem(400, 'Name the category.')
+                    c.execute('INSERT OR IGNORE INTO categories(name,pos) VALUES (?, (SELECT COALESCE(MAX(pos),0)+1 FROM categories))', (name,))
+                    if body.get('kind') in ('expense', 'income', 'transfer'):
+                        c.execute('UPDATE categories SET kind=? WHERE name=?', (body['kind'], name))
+                elif name not in have:
+                    raise Problem(404, 'No such category.')
+                elif act == 'kind':
+                    if body.get('kind') not in ('expense', 'income', 'transfer'):
+                        raise Problem(400, 'kind must be expense, income or transfer.')
+                    c.execute('UPDATE categories SET kind=? WHERE name=?', (body['kind'], name))
+                elif act == 'merge':
+                    into = str(body.get('into') or '').strip()[:60]
+                    if into not in have or into == name:
+                        raise Problem(400, 'Pick another existing category to merge into.')
+                    c.execute('UPDATE edits SET category=? WHERE category=?', (into, name))
+                    c.execute('UPDATE rules SET category=? WHERE category=?', (into, name))
+                    m = {k: v for k, v in (_setting(c, 'merged') or {}).items() if v != name}
+                    m = {k: (into if v == name else v) for k, v in m.items()}
+                    m[name] = into
+                    _set(c, 'merged', m)
+                    c.execute('DELETE FROM categories WHERE name=?', (name,))
+                elif act == 'delete':
+                    used = transactions({'category': name, 'limit': 1, 'hidden': 'true'}, c)['total']
+                    if used or c.execute('SELECT 1 FROM rules WHERE category=?', (name,)).fetchone():
+                        raise Problem(409, f'{name} is still used ({used} transactions); merge it instead.')
+                    c.execute('DELETE FROM categories WHERE name=?', (name,))
+                else:
+                    raise Problem(400, 'action must be add, kind, merge or delete.')
+        finally:
+            c.close()
+    return {'ok': True, 'categories': overview()['categories']}
+
+
+def rules_change(body):
+    """add {match, category, merchant?, min_abs?, max_abs?, days? ('25-5')} or delete {ids}."""
+    with LOCK:
+        c = db()
+        try:
+            with c:
+                if body.get('action') == 'delete':
+                    ids = [int(x) for x in body.get('ids') or []][:500]
+                    n = sum(c.execute('DELETE FROM rules WHERE id=?', (i,)).rowcount for i in ids)
+                    return {'ok': True, 'deleted': n}
+                match, cat = str(body.get('match') or '').strip()[:60], str(body.get('category') or '').strip()[:60]
+                if len(match) < 3 or not cat:
+                    raise Problem(400, 'A rule needs match text (3+ letters) and a category.')
+                days = str(body['days']) if body.get('days') else None
+                if days and not re.fullmatch(r'\d{1,2}-\d{1,2}', days):
+                    raise Problem(400, "days looks like '25-5' (25th through the 5th).")
+                lo, hi = (_num(body.get(k)) for k in ('min_abs', 'max_abs'))
+                c.execute('INSERT INTO rules(match,category,merchant,created,min_abs,max_abs,days) VALUES (?,?,?,?,?,?,?)',
+                          (match, cat, body.get('merchant') or None, _now(), lo, hi, days))
+                c.execute('INSERT OR IGNORE INTO categories(name,pos) VALUES (?, (SELECT COALESCE(MAX(pos),0)+1 FROM categories))', (cat,))
+                return {'ok': True, 'id': c.execute('SELECT last_insert_rowid()').fetchone()[0]}
+        finally:
+            c.close()
+
+
+FREE_RE = re.compile(r'free', re.I)
+
+
+def free_check(c, days=120):
+    """Free categories are card-benefit buys that a statement credit cancels. Pair each charge with a credit on the
+    same card (same Free category, or same amount within 60 days); a charge left unpaired is still real spending."""
+    since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    rows = [r for r in transactions({'from': since, 'all': True, 'limit': 1}, c)['rows'] if r['category'] and FREE_RE.search(r['category'])]
+    credits = [r for r in rows if (r['amount'] or 0) > 0]
+    used, waiting = set(), []
+    for ch in sorted((r for r in rows if (r['amount'] or 0) < 0), key=lambda r: r['date']):
+        hit = None
+        for cr in credits:
+            if id(cr) in used or cr['account_name'] != ch['account_name'] or not (0 <= _days_between(cr['date'], ch['date']) <= 60):
+                continue
+            if round(cr['amount'], 2) == round(-ch['amount'], 2) or cr['category'] == ch['category']:
+                hit = cr
+                break
+        if hit:
+            used.add(id(hit))
+        else:
+            waiting.append({k: ch[k] for k in ('date', 'amount', 'merchant', 'category', 'account_name', 'source', 'id')})
+    return {'since': since, 'charges': sum(1 for r in rows if (r['amount'] or 0) < 0), 'credits': len(credits),
+            'waiting_for_credit': waiting, 'waiting_total': round(-sum(w['amount'] for w in waiting), 2)}
 
 
 def rule_delete(rid):
@@ -1055,7 +1180,7 @@ def overview():
         out = {'source': src, 'source_name': NAMES.get(src, src), 'sources': srcs, 'chosen': bool(_setting(c, 'source')),
                'accounts': accts, 'hidden_accounts': hidden_accts, 'manual': manual_accounts(c), 'history': hist,
                'to_review': sum(1 for r in allrows if not r['reviewed']), 'transactions': len(allrows),
-               'categories': cats, 'category_kinds': _kinds(c), 'rules': _rules(c),
+               'categories': cats, 'category_kinds': _kinds(c), 'rules': _rules(c), 'free_check': free_check(c),
                'last_sync': _setting(c, 'last_sync'), 'error': _setting(c, 'last_error'), 'syncing': SYNCING.is_set(),
                'attention': attention(c, src, allaccts, accts)}
     finally:
@@ -1068,6 +1193,13 @@ def overview():
 # ---------------- MCP ----------------
 
 TOOLS = [
+    {'name': 'money_categories', 'description': "Change the owner's categories in Money only (never the bank or Monarch): action add (name, kind?), kind (name, kind = expense/income/transfer), merge (name into another: every transaction and rule moves, the old one disappears), delete (unused only). Only when the owner asked.",
+     'inputSchema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['add', 'kind', 'merge', 'delete']}, 'name': {'type': 'string'},
+                     'into': {'type': 'string'}, 'kind': {'type': 'string', 'enum': ['expense', 'income', 'transfer']}}, 'required': ['action', 'name'], 'additionalProperties': False}},
+    {'name': 'money_rules', 'description': "Add or delete auto-category rules in Money only. add: match text, category, optional merchant, min_abs/max_abs (size of the amount) and days ('25-5' = 25th through the 5th). The most specific matching rule wins. delete: ids. Only when the owner asked.",
+     'inputSchema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['add', 'delete']}, 'match': {'type': 'string'}, 'category': {'type': 'string'},
+                     'merchant': {'type': 'string'}, 'min_abs': {'type': 'number'}, 'max_abs': {'type': 'number'}, 'days': {'type': 'string'},
+                     'ids': {'type': 'array', 'items': {'type': 'integer'}}}, 'required': ['action'], 'additionalProperties': False}},
     {'name': 'money_overview', 'description': "Money app overview: which bank connection it reads (SimpleFIN by default), attention (banks that stopped updating or need reconnecting, or Money unable to refresh; tell the owner first), its accounts with balances, manual accounts (e.g. Bitcoin cold storage), imported history, how many transactions still need review, categories and auto-category rules, last sync.",
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
     {'name': 'money_transactions', 'description': "Search transactions with the owner's categories, merchant names, notes and reviewed state applied. Filters: from/to (YYYY-MM-DD), account (id, last digits or name), search, category, reviewed (true/false), min_amount/max_amount, direction (out = money out, in = money in), origin (bank = live connection, import = imported history), min_abs (size at least, in or out), sort (newest default, oldest, largest = biggest amounts first in or out, smallest, merchant/account/category A-Z or *_desc Z-A, spend = costs the most first, income = biggest money in first), limit (default 200). Each row says its origin. Negative = money out.",
@@ -1107,7 +1239,8 @@ def rpc(msg):
             a, n = p.get('arguments') or {}, p.get('name')
             fn = {'money_overview': lambda: overview(), 'money_transactions': lambda: transactions(a),
                   'money_spending': lambda: spending(a.get('month')), 'money_update': lambda: update(a),
-                  'money_manual_account': lambda: manual_save(a), 'money_net_worth': lambda: networth()}.get(n)
+                  'money_manual_account': lambda: manual_save(a), 'money_net_worth': lambda: networth(),
+                  'money_categories': lambda: categories_change(a), 'money_rules': lambda: rules_change(a)}.get(n)
             if not fn:
                 return {'jsonrpc': '2.0', 'id': i, 'error': {'code': -32602, 'message': 'Unknown tool.'}}
             v = fn()
@@ -1220,6 +1353,10 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             if path == '/api/update':
                 return self.send(200, update(b))
+            if path == '/api/categories':
+                return self.send(200, categories_change(b))
+            if path == '/api/rules':
+                return self.send(200, rules_change(b))
             if path == '/api/undo':
                 return self.send(200, undo())
             if path == '/api/accounts/hide':
