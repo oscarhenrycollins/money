@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.12.0'
+VERSION = '0.13.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -90,6 +90,8 @@ def db():
         c.execute('ALTER TABLE categories ADD COLUMN kind TEXT')   # expense | income | transfer (None = guess by name)
     if 'splits' not in {r[1] for r in c.execute('PRAGMA table_info(edits)')}:
         c.execute('ALTER TABLE edits ADD COLUMN splits TEXT')   # [{category, amount}] parts of one charge
+    if 'grp' not in {r[1] for r in c.execute('PRAGMA table_info(categories)')}:
+        c.execute('ALTER TABLE categories ADD COLUMN grp TEXT')   # the heading a category sits under (Food & Dining, Transfers...)
     rcols = {r[1] for r in c.execute('PRAGMA table_info(rules)')}
     for col in ('min_abs REAL', 'max_abs REAL', 'days TEXT', 'split_category TEXT', 'split_amount REAL'):   # optional conditions: size range, days of the month
         if col.split()[0] not in rcols:
@@ -870,6 +872,10 @@ def categories_change(body):
                         c.execute('UPDATE categories SET kind=? WHERE name=?', (body['kind'], name))
                 elif name not in have:
                     raise Problem(404, 'No such category.')
+                elif act == 'group':
+                    c.execute('UPDATE categories SET grp=? WHERE name=?', (str(body.get('group') or '').strip()[:60] or None, name))
+                    if body.get('position') is not None:
+                        c.execute('UPDATE categories SET pos=? WHERE name=?', (int(body['position']), name))
                 elif act == 'kind':
                     if body.get('kind') not in ('expense', 'income', 'transfer'):
                         raise Problem(400, 'kind must be expense, income or transfer.')
@@ -891,7 +897,7 @@ def categories_change(body):
                         raise Problem(409, f'{name} is still used ({used} transactions); merge it instead.')
                     c.execute('DELETE FROM categories WHERE name=?', (name,))
                 else:
-                    raise Problem(400, 'action must be add, kind, merge or delete.')
+                    raise Problem(400, 'action must be add, kind, group, merge or delete.')
         finally:
             c.close()
     return {'ok': True, 'categories': overview()['categories']}
@@ -1223,6 +1229,23 @@ SKIP = {'transfer', 'card payment', 'credit card payment'}
 INCOME = {'income', 'business income', 'other income', 'va income', 'military income', 'interest', 'paychecks'}
 
 
+KIND_GROUP = {'income': 'Income', 'transfer': 'Transfers', 'expense': 'Other'}
+
+
+def _groups(c):
+    """Categories under their headings, in his order: [{group, kind, categories}]. A heading's kind is its first
+    category's (income, expense or transfer = not counted as spending or income)."""
+    kinds, out, at = _kinds(c), [], {}
+    for name, grp in c.execute('SELECT name, grp FROM categories ORDER BY pos'):
+        kind = kinds.get(name.lower(), 'expense')
+        g = grp or KIND_GROUP[kind]
+        if g not in at:
+            at[g] = {'group': g, 'kind': kind, 'categories': []}
+            out.append(at[g])
+        at[g]['categories'].append(name)
+    return out
+
+
 def _kinds(c):
     """Category -> expense / income / transfer. His setting (or Monarch's group) wins; otherwise guess by name."""
     out = {}
@@ -1237,6 +1260,7 @@ def spending(month=None):
     c = db()
     try:
         kinds = _kinds(c)
+        gof = {n: g['group'] for g in _groups(c) for n in g['categories']}
     finally:
         c.close()
     cats, income, spent = {}, 0.0, 0.0
@@ -1251,8 +1275,12 @@ def spending(month=None):
         cats[cat] = cats.get(cat, 0) - amt   # refunds and credits net against spending
     cats = {k: round(v, 2) for k, v in cats.items() if abs(v) >= 0.005}
     spent = round(sum(v for v in cats.values() if v > 0), 2)
-    return {'month': label, 'spent': spent, 'income': round(income, 2),
-            'categories': sorted(({'category': k, 'amount': v} for k, v in cats.items()), key=lambda x: -x['amount'])}
+    rows = sorted(({'category': k, 'amount': v, 'group': gof.get(k, 'Other')} for k, v in cats.items()), key=lambda x: -x['amount'])
+    groups = {}
+    for r in rows:
+        groups[r['group']] = round(groups.get(r['group'], 0) + r['amount'], 2)
+    return {'month': label, 'spent': spent, 'income': round(income, 2), 'categories': rows,
+            'groups': sorted(({'group': k, 'amount': v} for k, v in groups.items()), key=lambda x: -x['amount'])}
 
 
 def _days_ago(d, today):
@@ -1325,7 +1353,7 @@ def overview():
         out = {'source': src, 'source_name': NAMES.get(src, src), 'sources': srcs, 'chosen': bool(_setting(c, 'source')),
                'accounts': accts, 'hidden_accounts': hidden_accts, 'manual': manual_accounts(c), 'history': hist,
                'to_review': sum(1 for r in allrows if not r['reviewed']), 'transactions': len(allrows),
-               'categories': cats, 'category_kinds': _kinds(c), 'rules': _rules(c), 'free_check': free_check(c),
+               'categories': cats, 'category_kinds': _kinds(c), 'category_groups': _groups(c), 'rules': _rules(c), 'free_check': free_check(c),
                'last_sync': _setting(c, 'last_sync'), 'error': _setting(c, 'last_error'), 'syncing': SYNCING.is_set(),
                'attention': attention(c, src, allaccts, accts)}
     finally:
@@ -1338,8 +1366,8 @@ def overview():
 # ---------------- MCP ----------------
 
 TOOLS = [
-    {'name': 'money_categories', 'description': "Change the owner's categories in Money only (never the bank or Monarch): action add (name, kind?), kind (name, kind = expense/income/transfer), merge (name into another: every transaction and rule moves, the old one disappears), delete (unused only). Only when the owner asked.",
-     'inputSchema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['add', 'kind', 'merge', 'delete']}, 'name': {'type': 'string'},
+    {'name': 'money_categories', 'description': "Change the owner's categories in Money only (never the bank or Monarch): action add (name, kind?), kind (name, kind = expense/income/transfer), group (name, group heading, optional position for order), merge (name into another: every transaction and rule moves, the old one disappears), delete (unused only). Only when the owner asked.",
+     'inputSchema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['add', 'kind', 'group', 'merge', 'delete']}, 'name': {'type': 'string'}, 'group': {'type': 'string'}, 'position': {'type': 'integer'},
                      'into': {'type': 'string'}, 'kind': {'type': 'string', 'enum': ['expense', 'income', 'transfer']}}, 'required': ['action', 'name'], 'additionalProperties': False}},
     {'name': 'money_rules', 'description': "Add or delete auto-category rules in Money only. add: match text, category, optional merchant, min_abs/max_abs (size of the amount) and days ('25-5' = 25th through the 5th); split_category + split_amount sends that fixed amount of each charge to split_category and the rest to category. The most specific matching rule wins. delete: ids. Only when the owner asked.",
      'inputSchema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['add', 'delete']}, 'match': {'type': 'string'}, 'category': {'type': 'string'},

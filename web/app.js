@@ -326,9 +326,12 @@ function drawMenu() {
     const box = h('div', 'mn-mcats'); list.append(box);
     const draw = () => {
       box.replaceChildren(); const q = inp.value.trim().toLowerCase();
-      if (!q) box.append(mItem('Any category', !f.category, () => setKey('category', '')));
-      for (const c of ['Uncategorized', ...[...(ov?.categories || [])].sort((a, b) => a.replace(/^\W+/, '').localeCompare(b.replace(/^\W+/, ''), undefined, { sensitivity: 'base' }))])
-        if (!q || c.toLowerCase().includes(q)) box.append(mItem(c, f.category === c, () => setKey('category', c), catIcon(c)));
+      if (!q) box.append(mItem('Any category', !f.category, () => setKey('category', '')), mItem('Uncategorized', f.category === 'Uncategorized', () => setKey('category', 'Uncategorized'), catIcon('Uncategorized')));
+      for (const g of catGroups()) {
+        const hits = g.categories.filter((c) => !q || c.toLowerCase().includes(q));
+        if (hits.length) box.append(mSec(groupHead(g)));
+        for (const c of hits) box.append(mItem(c, f.category === c, () => setKey('category', c), catIcon(c)));
+      }
     };
     inp.oninput = draw; draw();
   } else if (k === 'amount') {
@@ -380,6 +383,10 @@ function openPicker() {
   el('t-picker').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 function choose(c) { pick = c; showPick(); closePicker(); }
+/* category headings (Food & Dining, Transfers...) in his order; transfers and income say how they count */
+const KIND_NOTE = { transfer: 'not spending', income: 'income' };
+function catGroups() { return ov?.category_groups || [{ group: 'Categories', kind: 'expense', categories: ov?.categories || [] }]; }
+function groupHead(g) { const n = KIND_NOTE[g.kind]; return g.group + (n && !g.group.toLowerCase().includes(n) ? ' · ' + n : ''); }
 function catList(ul, q, current, onChoose) {
   ul.replaceChildren();
   q = q.trim(); const ql = q.toLowerCase();
@@ -401,8 +408,8 @@ function catList(ul, q, current, onChoose) {
   }
   const rec = recent().filter((c) => all.includes(c));
   if (current && !rec.includes(current)) rec.unshift(current);
-  if (rec.length) { ul.append(h('li', 'mn-cath', 'Recent')); rec.forEach((c) => item(c)); ul.append(h('li', 'mn-cath', 'All categories')); }
-  all.forEach((c) => item(c));
+  if (rec.length) { ul.append(h('li', 'mn-cath', 'Recent')); rec.forEach((c) => item(c)); }
+  for (const g of catGroups()) { ul.append(h('li', 'mn-cath', groupHead(g))); g.categories.forEach((c) => item(c)); }
 }
 function drawCats() { catList(el('t-cats'), el('t-catq').value, pick, choose); }
 
@@ -526,7 +533,12 @@ function paintSpending(s) {
   }
   const prevBy = Object.fromEntries((prev?.categories || []).map((c) => [c.category, c.amount]));
   const ul = el('cats'); ul.replaceChildren();
-  for (const c of s.categories) {
+  const gTot = Object.fromEntries((s.groups || []).map((g) => [g.group, g.amount]));
+  const order = (s.groups || []).map((g) => g.group);
+  const sorted = s.groups ? [...s.categories].sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group)) : s.categories;
+  let lastG = null;
+  for (const c of sorted) {
+    if (s.groups && c.group !== lastG) { lastG = c.group; const gh = h('li', 'mn-gh'); gh.append(h('span', '', c.group), h('b', '', money(gTot[c.group]))); ul.append(gh); }
     const li = h('li', 'mn-cat'); li.tabIndex = 0; li.setAttribute('role', 'button');
     const pct = c.amount > 0 ? c.amount / total * 100 : 0, maxAmt = cats[0]?.amount || 1;
     const body = h('div', 'mn-cat-b');
