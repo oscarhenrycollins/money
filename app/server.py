@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.13.0'
+VERSION = '0.13.1'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -246,7 +246,17 @@ def sync(source=None):
                             source, str(a['id']), a.get('institution'), a.get('name'), a.get('last_four'),
                             a.get('type') or ('credit' if re.search(r'card|credit', str(a.get('name')), re.I) else None),
                             a.get('currency') or 'USD', _num(bal), a.get('balance_at')))
+                    was = {r[0]: (r[1], r[2]) for r in c.execute("SELECT id, status, amount FROM tx WHERE source=? AND status='pending'", (source,))}
                     for t in rows.values():
+                        old = was.get(str(t['id']))
+                        new_amt, new_status = _num(t.get('amount')), t.get('status') or 'posted'
+                        if old and new_amt is not None and old[1] is not None and abs(new_amt - old[1]) >= 0.01:
+                            # a reviewed pending charge settled at a different amount (tip, deposit, exchange rate): back to review
+                            e = c.execute('SELECT reviewed, note FROM edits WHERE source=? AND id=?', (source, str(t['id']))).fetchone()
+                            if e and e['reviewed']:
+                                msg = f"{'Posted' if new_status == 'posted' else 'Changed'} at {abs(new_amt):.2f} (was {abs(old[1]):.2f} when reviewed)."
+                                c.execute('UPDATE edits SET reviewed=0, note=? WHERE source=? AND id=?',
+                                          (((e['note'] + ' ') if e['note'] else '') + msg, source, str(t['id'])))
                         c.execute('''INSERT INTO tx VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,id) DO UPDATE SET
                           account=excluded.account, date=excluded.date, amount=excluded.amount, description=excluded.description,
                           merchant=excluded.merchant, source_category=excluded.source_category, status=excluded.status, seen=excluded.seen''', (
@@ -255,6 +265,13 @@ def sync(source=None):
                             t.get('status') or 'posted', now))
                     # A pending charge that posted under a new id disappears from the connector: drop it here too.
                     if rows:
+                        gone = c.execute('''SELECT t.date, t.amount, t.description, a.name AS account_name FROM tx t LEFT JOIN accounts a
+                                            ON a.source=t.source AND a.id=t.account WHERE t.source=? AND t.status='pending' AND t.seen<>?''', (source, now)).fetchall()
+                        if gone:   # holds that dropped off without posting (hotel/rental deposits, pre-auths): keep a 30-day note
+                            cut = (dt.date.today() - dt.timedelta(days=30)).isoformat()
+                            keep = [x for x in (_setting(c, 'released') or []) if x.get('at', '') >= cut]
+                            keep += [{'date': g['date'], 'amount': g['amount'], 'description': g['description'], 'account_name': g['account_name'], 'at': now[:10]} for g in gone]
+                            _set(c, 'released', keep[-100:])
                         c.execute("DELETE FROM tx WHERE source=? AND status='pending' AND seen<>?", (source, now))
                     _set(c, 'last_sync', now)
                     _set(c, 'last_error', None)
@@ -1353,7 +1370,8 @@ def overview():
         out = {'source': src, 'source_name': NAMES.get(src, src), 'sources': srcs, 'chosen': bool(_setting(c, 'source')),
                'accounts': accts, 'hidden_accounts': hidden_accts, 'manual': manual_accounts(c), 'history': hist,
                'to_review': sum(1 for r in allrows if not r['reviewed']), 'transactions': len(allrows),
-               'categories': cats, 'category_kinds': _kinds(c), 'category_groups': _groups(c), 'rules': _rules(c), 'free_check': free_check(c),
+               'categories': cats, 'category_kinds': _kinds(c), 'category_groups': _groups(c),
+               'released_holds': _setting(c, 'released') or [], 'rules': _rules(c), 'free_check': free_check(c),
                'last_sync': _setting(c, 'last_sync'), 'error': _setting(c, 'last_error'), 'syncing': SYNCING.is_set(),
                'attention': attention(c, src, allaccts, accts)}
     finally:
