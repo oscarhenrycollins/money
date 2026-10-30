@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'money'
-VERSION = '0.11.0'
+VERSION = '0.12.0'
 PREFIX = '/' + APP_ID
 PORT = os.environ.get('PORT', '8809')
 SYNC_MINUTES = float(os.environ.get('MONEY_SYNC_MINUTES', '30'))
@@ -88,8 +88,10 @@ def db():
     ''')
     if 'kind' not in {r[1] for r in c.execute('PRAGMA table_info(categories)')}:
         c.execute('ALTER TABLE categories ADD COLUMN kind TEXT')   # expense | income | transfer (None = guess by name)
+    if 'splits' not in {r[1] for r in c.execute('PRAGMA table_info(edits)')}:
+        c.execute('ALTER TABLE edits ADD COLUMN splits TEXT')   # [{category, amount}] parts of one charge
     rcols = {r[1] for r in c.execute('PRAGMA table_info(rules)')}
-    for col in ('min_abs REAL', 'max_abs REAL', 'days TEXT'):   # optional conditions: size range, days of the month
+    for col in ('min_abs REAL', 'max_abs REAL', 'days TEXT', 'split_category TEXT', 'split_amount REAL'):   # optional conditions: size range, days of the month
         if col.split()[0] not in rcols:
             c.execute('ALTER TABLE rules ADD COLUMN ' + col)
     if not c.execute('SELECT 1 FROM categories LIMIT 1').fetchone():
@@ -301,7 +303,7 @@ def _scheduler():
 # ---------------- the owner's layer ----------------
 
 def _rules(c):
-    return [dict(r) for r in c.execute('SELECT id,match,category,merchant,min_abs,max_abs,days FROM rules ORDER BY id')]
+    return [dict(r) for r in c.execute('SELECT id,match,category,merchant,min_abs,max_abs,days,split_category,split_amount FROM rules ORDER BY id')]
 
 
 def _in_days(spec, date):
@@ -542,6 +544,23 @@ def _hint(t, hints):
     return best and best[1]
 
 
+def _rule_split(amount, rule):
+    """A rule that sends a fixed amount to one category and the rest to its own: below the fixed amount everything
+    is his own, exactly it is all the split category, above it the charge is shared."""
+    a, fixed = abs(amount or 0), rule['split_amount']
+    sign = -1 if (amount or 0) < 0 else 1
+    if a + 0.005 < fixed:
+        return [{'category': rule['category'], 'amount': amount}]
+    if abs(a - fixed) < 0.01:
+        return [{'category': rule['split_category'], 'amount': amount}]
+    return [{'category': rule['split_category'], 'amount': round(sign * fixed, 2)},
+            {'category': rule['category'], 'amount': round(sign * (a - fixed), 2)}]
+
+
+def _parts(t):
+    return t.get('splits') or [{'category': t.get('category'), 'amount': t.get('amount')}]
+
+
 def _days_between(a, b):
     try:
         return (dt.date.fromisoformat(str(a)[:10]) - dt.date.fromisoformat(str(b)[:10])).days
@@ -574,6 +593,19 @@ def _view(row, ctx):
     merged = ctx.get('merged') if isinstance(ctx, dict) else None
     if cat and merged:
         cat = merged.get(cat.lower(), cat)
+    parts = None
+    if t.get('e_splits'):
+        parts, came = json.loads(t['e_splits']), 'you'
+    elif rule and rule.get('split_category') and rule.get('split_amount') and came == 'rule':
+        parts = _rule_split(t.get('amount'), rule)
+    t.pop('e_splits', None)
+    if parts and merged:
+        parts = [{**x, 'category': merged.get(x['category'].lower(), x['category'])} for x in parts]
+    if parts and len(parts) > 1:
+        t['splits'] = parts
+        cat = max(parts, key=lambda x: abs(x['amount']))['category']
+    elif parts:
+        cat = parts[0]['category']
     t['category'] = cat or None
     t['category_from'] = came if cat else None
     t['merchant'] = t.pop('e_merchant') or (rule and rule['merchant']) or t.get('merchant') or _tidy(t.get('description'))
@@ -589,7 +621,7 @@ def _tidy(desc):
 
 SELECT = '''SELECT t.source, t.id, t.account, a.institution, a.name AS account_name, a.last_four, t.date, t.amount,
   t.description, t.merchant, t.source_category, t.status, COALESCE(e.reviewed,0) AS reviewed, e.category AS e_category,
-  e.merchant AS e_merchant, e.note, COALESCE(e.hidden,0) AS hidden
+  e.merchant AS e_merchant, e.note, COALESCE(e.hidden,0) AS hidden, e.splits AS e_splits
   FROM tx t LEFT JOIN accounts a ON a.source=t.source AND a.id=t.account LEFT JOIN edits e ON e.source=t.source AND e.id=t.id'''
 
 
@@ -709,7 +741,7 @@ def transactions(args, c=None):
             rows = [r for r in rows if any(s in str(r.get(k) or '').lower() for k in ('merchant', 'description', 'note', 'category', 'account_name'))]
         if args.get('category'):
             want = str(args['category']).lower()
-            rows = [r for r in rows if (r['category'] or 'Uncategorized').lower() == want]
+            rows = [r for r in rows if any((x['category'] or 'Uncategorized').lower() == want for x in _parts(r))]
         srt = str(args.get('sort') or '')
         base, desc = (srt[:-5], True) if srt.endswith('_desc') else (srt, False)
         text_keys = {'merchant': lambda r: re.sub(r'^\W+', '', r['merchant'] or r['description'] or '').lower(),
@@ -746,7 +778,7 @@ def transactions(args, c=None):
 def update(body):
     src, tid = str(body.get('source') or ''), str(body.get('id') or '')
     ids = body.get('ids') if isinstance(body.get('ids'), list) else [tid]
-    fields = {k: body[k] for k in ('reviewed', 'category', 'merchant', 'note', 'hidden') if k in body}
+    fields = {k: body[k] for k in ('reviewed', 'category', 'merchant', 'note', 'hidden', 'splits') if k in body}
     if not fields:
         raise Problem(400, 'Nothing to change.')
     for k in ('category', 'merchant', 'note'):
@@ -762,12 +794,20 @@ def update(body):
                     i = str(i)
                     if not c.execute('SELECT 1 FROM tx WHERE source=? AND id=?', (src, i)).fetchone():
                         raise Problem(404, 'No such transaction.')
-                    old = c.execute('SELECT reviewed,category,merchant,note,hidden FROM edits WHERE source=? AND id=?', (src, i)).fetchone()
+                    old = c.execute('SELECT reviewed,category,merchant,note,hidden,splits FROM edits WHERE source=? AND id=?', (src, i)).fetchone()
                     c.execute('INSERT INTO log(at,source,tx,before) VALUES (?,?,?,?)', (_now(), src, i, json.dumps(dict(old) if old else None)))
-                    cur = dict(old) if old else {'reviewed': 0, 'category': None, 'merchant': None, 'note': None, 'hidden': 0}
+                    cur = dict(old) if old else {'reviewed': 0, 'category': None, 'merchant': None, 'note': None, 'hidden': 0, 'splits': None}
                     for k, v in fields.items():
+                        if k == 'splits':
+                            amt = c.execute('SELECT amount FROM tx WHERE source=? AND id=?', (src, i)).fetchone()[0]
+                            v = _check_splits(v, amt)
+                            if 'category' not in fields:
+                                cur['category'] = None
+                        elif k == 'category' and 'splits' not in fields:
+                            cur['splits'] = None   # one category replaces a split
                         cur[k] = (1 if v else 0) if k in ('reviewed', 'hidden') else v
-                    c.execute('INSERT OR REPLACE INTO edits VALUES (?,?,?,?,?,?,?,?)', (src, i, cur['reviewed'], cur['category'], cur['merchant'], cur['note'], cur['hidden'], _now()))
+                    c.execute('INSERT OR REPLACE INTO edits(source,id,reviewed,category,merchant,note,hidden,at,splits) VALUES (?,?,?,?,?,?,?,?,?)',
+                              (src, i, cur['reviewed'], cur['category'], cur['merchant'], cur['note'], cur['hidden'], _now(), cur['splits']))
                 if body.get('make_rule') and fields.get('category'):
                     match = str(body.get('match') or '').strip()[:60]
                     if len(match) < 3:
@@ -776,6 +816,19 @@ def update(body):
         finally:
             c.close()
     return {'ok': True, 'changed': len(ids)}
+
+
+def _check_splits(parts, amount):
+    """[{category, amount}] (amounts as sizes or signed); they must add up to the charge. None or [] clears."""
+    if not parts:
+        return None
+    if not isinstance(parts, list) or len(parts) > 10:
+        raise Problem(400, 'splits must be a short list of {category, amount}.')
+    sign = -1 if (amount or 0) < 0 else 1
+    out = [{'category': str(x.get('category') or '').strip()[:60], 'amount': round(sign * abs(float(x.get('amount'))), 2)} for x in parts]
+    if any(not x['category'] for x in out) or abs(sum(x['amount'] for x in out) - (amount or 0)) > 0.01:
+        raise Problem(400, f'The parts must add up to {abs(amount or 0):.2f}.')
+    return json.dumps(out)
 
 
 def undo():
@@ -790,7 +843,8 @@ def undo():
                 for r in batch:
                     b = json.loads(r['before']) if r['before'] else None
                     if b:
-                        c.execute('INSERT OR REPLACE INTO edits VALUES (?,?,?,?,?,?,?,?)', (r['source'], r['tx'], b['reviewed'], b['category'], b['merchant'], b['note'], b['hidden'], _now()))
+                        c.execute('INSERT OR REPLACE INTO edits(source,id,reviewed,category,merchant,note,hidden,at,splits) VALUES (?,?,?,?,?,?,?,?,?)',
+                                  (r['source'], r['tx'], b['reviewed'], b['category'], b['merchant'], b['note'], b['hidden'], _now(), b.get('splits')))
                     else:
                         c.execute('DELETE FROM edits WHERE source=? AND id=?', (r['source'], r['tx']))
                     c.execute('DELETE FROM log WHERE id=?', (r['id'],))
@@ -860,8 +914,11 @@ def rules_change(body):
                 if days and not re.fullmatch(r'\d{1,2}-\d{1,2}', days):
                     raise Problem(400, "days looks like '25-5' (25th through the 5th).")
                 lo, hi = (_num(body.get(k)) for k in ('min_abs', 'max_abs'))
-                c.execute('INSERT INTO rules(match,category,merchant,created,min_abs,max_abs,days) VALUES (?,?,?,?,?,?,?)',
-                          (match, cat, body.get('merchant') or None, _now(), lo, hi, days))
+                sc, sa = (str(body.get('split_category') or '').strip()[:60] or None), _num(body.get('split_amount'))
+                if bool(sc) != bool(sa):
+                    raise Problem(400, 'A split rule needs split_category and split_amount.')
+                c.execute('INSERT INTO rules(match,category,merchant,created,min_abs,max_abs,days,split_category,split_amount) VALUES (?,?,?,?,?,?,?,?,?)',
+                          (match, cat, body.get('merchant') or None, _now(), lo, hi, days, sc, abs(sa) if sa else None))
                 c.execute('INSERT OR IGNORE INTO categories(name,pos) VALUES (?, (SELECT COALESCE(MAX(pos),0)+1 FROM categories))', (cat,))
                 return {'ok': True, 'id': c.execute('SELECT last_insert_rowid()').fetchone()[0]}
         finally:
@@ -1005,7 +1062,7 @@ def import_history(body):
                               _num(t.get('amount')), (t.get('description') or '')[:200], t.get('counterparty') or None, t.get('category'), 'posted', now))
                     # History arrives already reviewed: it was reviewed (or not) in the old app, not here.
                     pend = str(t['id']) in review
-                    c.execute('INSERT OR IGNORE INTO edits VALUES (?,?,?,?,?,?,?,?)', ('import', str(t['id']), 0 if pend else 1, None, None, None, 0, now))
+                    c.execute('INSERT OR IGNORE INTO edits(source,id,reviewed,category,merchant,note,hidden,at) VALUES (?,?,?,?,?,?,?,?)', ('import', str(t['id']), 0 if pend else 1, None, None, None, 0, now))
                     if pend:
                         c.execute("UPDATE edits SET reviewed=0 WHERE source='import' AND id=?", (str(t['id']),))
                 _set(c, 'import_keep', sorted(review))
@@ -1183,15 +1240,15 @@ def spending(month=None):
     finally:
         c.close()
     cats, income, spent = {}, 0.0, 0.0
-    for t in rows:
-        cat = t['category'] or 'Uncategorized'
+    for part in (x for t in rows for x in _parts(t)):
+        cat, amt = part['category'] or 'Uncategorized', part['amount']
         kind = kinds.get(cat.lower()) or ('transfer' if cat.lower() in SKIP else 'income' if cat.lower() in INCOME else 'expense')
-        if kind == 'transfer' or t['amount'] is None:
+        if kind == 'transfer' or amt is None:
             continue
-        if t['amount'] > 0 and kind == 'income':
-            income += t['amount']
+        if amt > 0 and kind == 'income':
+            income += amt
             continue
-        cats[cat] = cats.get(cat, 0) - t['amount']   # refunds and credits net against spending
+        cats[cat] = cats.get(cat, 0) - amt   # refunds and credits net against spending
     cats = {k: round(v, 2) for k, v in cats.items() if abs(v) >= 0.005}
     spent = round(sum(v for v in cats.values() if v > 0), 2)
     return {'month': label, 'spent': spent, 'income': round(income, 2),
@@ -1284,9 +1341,10 @@ TOOLS = [
     {'name': 'money_categories', 'description': "Change the owner's categories in Money only (never the bank or Monarch): action add (name, kind?), kind (name, kind = expense/income/transfer), merge (name into another: every transaction and rule moves, the old one disappears), delete (unused only). Only when the owner asked.",
      'inputSchema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['add', 'kind', 'merge', 'delete']}, 'name': {'type': 'string'},
                      'into': {'type': 'string'}, 'kind': {'type': 'string', 'enum': ['expense', 'income', 'transfer']}}, 'required': ['action', 'name'], 'additionalProperties': False}},
-    {'name': 'money_rules', 'description': "Add or delete auto-category rules in Money only. add: match text, category, optional merchant, min_abs/max_abs (size of the amount) and days ('25-5' = 25th through the 5th). The most specific matching rule wins. delete: ids. Only when the owner asked.",
+    {'name': 'money_rules', 'description': "Add or delete auto-category rules in Money only. add: match text, category, optional merchant, min_abs/max_abs (size of the amount) and days ('25-5' = 25th through the 5th); split_category + split_amount sends that fixed amount of each charge to split_category and the rest to category. The most specific matching rule wins. delete: ids. Only when the owner asked.",
      'inputSchema': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['add', 'delete']}, 'match': {'type': 'string'}, 'category': {'type': 'string'},
                      'merchant': {'type': 'string'}, 'min_abs': {'type': 'number'}, 'max_abs': {'type': 'number'}, 'days': {'type': 'string'},
+                     'split_category': {'type': 'string'}, 'split_amount': {'type': 'number'},
                      'ids': {'type': 'array', 'items': {'type': 'integer'}}}, 'required': ['action'], 'additionalProperties': False}},
     {'name': 'money_overview', 'description': "Money app overview: which bank connection it reads (SimpleFIN by default), attention (banks that stopped updating or need reconnecting, or Money unable to refresh; tell the owner first), its accounts with balances, manual accounts (e.g. Bitcoin cold storage), imported history, how many transactions still need review, categories and auto-category rules, last sync.",
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
@@ -1298,9 +1356,9 @@ TOOLS = [
      'annotations': {'readOnlyHint': True}},
     {'name': 'money_spending', 'description': 'Spending by category for a month (YYYY-MM, default this month); refunds and credits net against their category; transfers and card payments excluded.',
      'inputSchema': {'type': 'object', 'properties': {'month': {'type': 'string'}}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
-    {'name': 'money_update', 'description': "Change the owner's layer on transactions (never the bank's data): reviewed, category, merchant, note, hidden. Pass source and id (or ids for several). With make_rule true and match text, also saves a rule so future matching transactions get that category. Only do this when the owner asked.",
+    {'name': 'money_update', 'description': "Change the owner's layer on transactions (never the bank's data): reviewed, category, merchant, note, hidden, splits ([{category, amount}] that add up to the charge; an empty list or a plain category clears it). Pass source and id (or ids for several). With make_rule true and match text, also saves a rule so future matching transactions get that category. Only do this when the owner asked.",
      'inputSchema': {'type': 'object', 'properties': {'source': {'type': 'string'}, 'id': {'type': 'string'}, 'ids': {'type': 'array', 'items': {'type': 'string'}}, 'reviewed': {'type': 'boolean'},
-                     'category': {'type': 'string'}, 'merchant': {'type': 'string'}, 'note': {'type': 'string'}, 'hidden': {'type': 'boolean'}, 'make_rule': {'type': 'boolean'}, 'match': {'type': 'string'}},
+                     'category': {'type': 'string'}, 'merchant': {'type': 'string'}, 'note': {'type': 'string'}, 'hidden': {'type': 'boolean'}, 'splits': {'type': 'array', 'items': {'type': 'object', 'properties': {'category': {'type': 'string'}, 'amount': {'type': 'number'}}}}, 'make_rule': {'type': 'boolean'}, 'match': {'type': 'string'}},
                      'required': ['source'], 'additionalProperties': False},
      'annotations': {'readOnlyHint': False, 'destructiveHint': False}},
     {'name': 'money_net_worth', 'description': 'Net worth now (assets, liabilities, every account with where its balance comes from: bank connection, manual, or imported history) and its history (monthly imported points plus one point per day since).',

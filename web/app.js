@@ -237,7 +237,7 @@ function row(t, maxAbs) {
   ac.append(card(t), h('span', 'mn-acn', shortAcct(t.account_name)));
   const cat = h('button', 'mn-rowcat c-category' + (t.category ? '' : ' none')); cat.type = 'button';
   cat.setAttribute('aria-haspopup', 'listbox'); cat.setAttribute('aria-label', 'Category: ' + (t.category || 'Uncategorized') + '. Change');
-  cat.append(catIcon(t.category), h('span', '', t.category || 'Uncategorized'));
+  cat.append(catIcon(t.category), h('span', '', t.splits ? t.splits.map((x) => x.category + ' ' + money(Math.abs(x.amount))).join(' + ') : (t.category || 'Uncategorized')));
   cat.insertAdjacentHTML('beforeend', '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>');
   cat.onclick = (e) => { e.stopPropagation(); openPop(t, cat); };
   const am = h('button', 'mn-td c-amount'); am.type = 'button'; am.onclick = open;
